@@ -3,6 +3,7 @@ import { View, StyleSheet, Alert, Text, TouchableOpacity } from 'react-native';
 import { InteractiveChart } from '../components/InteractiveChart';
 import { ChartOrderPanel } from '../components/ChartOrderPanel';
 import { DhanApiService } from '../services/dhanApi';
+import { DhanWebSocketService } from '../services/dhanWebSocket';
 import { ComplianceEngine } from '../services/complianceEngine';
 import {
   CandleData,
@@ -26,6 +27,10 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
   onTradeExecuted,
 }) => {
   const [candles, setCandles] = useState<CandleData[]>([]);
+  const [timeframe, setTimeframe] = useState('5m');
+  const [showVWAP, setShowVWAP] = useState(true);
+  const [showEMA9, setShowEMA9] = useState(true);
+
   const [transactionType, setTransactionType] = useState<TransactionType>('BUY');
   const [orderType, setOrderType] = useState<OrderType>('LIMIT');
   const [lots, setLots] = useState(1);
@@ -50,26 +55,44 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
   const lotSize = selectedContract.lotSize || indexConfig.lotSize;
 
   // Load candles
-  useEffect(() => {
-    let isMounted = true;
-    async function loadCandles() {
-      const data = await DhanApiService.getChartCandles(
-        selectedContract.securityId,
-        selectedContract.exchangeSegment
-      );
-      if (isMounted && data.length > 0) {
-        setCandles(data);
-        const lastCandle = data[data.length - 1];
-        setEntryPrice(lastCandle.close);
-        setStopLossPrice(Number((lastCandle.close * 0.85).toFixed(1)));
-        setTargetPrice(Number((lastCandle.close * 1.3).toFixed(1)));
-      }
+  const loadCandles = useCallback(async () => {
+    const data = await DhanApiService.getChartCandles(
+      selectedContract.securityId,
+      selectedContract.exchangeSegment
+    );
+    if (data.length > 0) {
+      setCandles(data);
+      const lastCandle = data[data.length - 1];
+      setEntryPrice(lastCandle.close);
+      setStopLossPrice(Number((lastCandle.close * 0.85).toFixed(1)));
+      setTargetPrice(Number((lastCandle.close * 1.3).toFixed(1)));
     }
-    loadCandles();
-    return () => {
-      isMounted = false;
-    };
   }, [selectedContract]);
+
+  useEffect(() => {
+    loadCandles();
+  }, [loadCandles, timeframe]);
+
+  // Connect WebSocket for live ticks
+  useEffect(() => {
+    DhanWebSocketService.connect();
+
+    const unsubscribe = DhanWebSocketService.subscribe(
+      selectedContract.securityId,
+      (tick) => {
+        if (tick && tick.ltp) {
+          // If in MARKET order type, sync entry with live tick
+          if (orderType === 'MARKET') {
+            setEntryPrice(tick.ltp);
+          }
+        }
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [selectedContract.securityId, orderType]);
 
   // Run compliance validation whenever trade parameters change
   const runValidation = useCallback(async () => {
@@ -174,7 +197,7 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
         </TouchableOpacity>
       </View>
 
-      {/* Interactive TradingView Chart */}
+      {/* Interactive TradingView Chart with VWAP & EMA Indicators */}
       <View style={styles.chartWrapper}>
         <InteractiveChart
           candles={candles}
@@ -186,6 +209,12 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
           lots={lots}
           onPriceSelected={handlePriceSelected}
           activeLineType={activeLineType}
+          showVWAP={showVWAP}
+          showEMA9={showEMA9}
+          timeframe={timeframe}
+          onSelectTimeframe={(tf) => setTimeframe(tf)}
+          onToggleVWAP={() => setShowVWAP(!showVWAP)}
+          onToggleEMA9={() => setShowEMA9(!showEMA9)}
         />
       </View>
 

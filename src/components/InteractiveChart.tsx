@@ -1,7 +1,8 @@
 import React, { useRef, useEffect } from 'react';
-import { View, StyleSheet, Text, Platform } from 'react-native';
+import { View, StyleSheet, Text, TouchableOpacity } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { CandleData } from '../types/dhan';
+import { calculateVWAP, calculateEMA } from '../utils/indicators';
 
 interface InteractiveChartProps {
   candles: CandleData[];
@@ -13,6 +14,12 @@ interface InteractiveChartProps {
   lots: number;
   onPriceSelected?: (price: number) => void;
   activeLineType?: 'ENTRY' | 'SL' | 'TP';
+  showVWAP?: boolean;
+  showEMA9?: boolean;
+  timeframe?: string;
+  onSelectTimeframe?: (tf: string) => void;
+  onToggleVWAP?: () => void;
+  onToggleEMA9?: () => void;
 }
 
 export const InteractiveChart: React.FC<InteractiveChartProps> = ({
@@ -25,6 +32,12 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   lots,
   onPriceSelected,
   activeLineType = 'ENTRY',
+  showVWAP = true,
+  showEMA9 = true,
+  timeframe = '5m',
+  onSelectTimeframe,
+  onToggleVWAP,
+  onToggleEMA9,
 }) => {
   const webViewRef = useRef<any>(null);
   const WebViewComponent: any = WebView;
@@ -39,6 +52,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
   const rrRatio = slRiskPts > 0 ? (tpRewardPts / slRiskPts).toFixed(2) : '0';
 
+  // Compute indicators
+  const vwapData = showVWAP ? calculateVWAP(candles) : [];
+  const ema9Data = showEMA9 ? calculateEMA(candles, 9) : [];
+
   const chartHtml = `
     <!DOCTYPE html>
     <html>
@@ -51,19 +68,21 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           #container { width: 100%; height: 100%; position: relative; }
           .chart-header {
             position: absolute;
-            top: 8px;
-            left: 10px;
+            top: 6px;
+            left: 8px;
             z-index: 10;
             display: flex;
             align-items: center;
-            gap: 8px;
-            background: rgba(15, 23, 42, 0.75);
+            gap: 6px;
+            background: rgba(15, 23, 42, 0.85);
             padding: 4px 8px;
             border-radius: 6px;
             border: 1px solid rgba(255,255,255,0.08);
           }
-          .symbol-text { color: #F8FAFC; font-weight: 700; font-size: 13px; }
-          .ltp-text { color: #38BDF8; font-weight: 600; font-size: 13px; }
+          .symbol-text { color: #F8FAFC; font-weight: 700; font-size: 12px; }
+          .ltp-text { color: #38BDF8; font-weight: 600; font-size: 12px; }
+          .vwap-indicator { color: #F59E0B; font-size: 10px; font-weight: 700; }
+          .ema-indicator { color: #06B6D4; font-size: 10px; font-weight: 700; }
         </style>
       </head>
       <body>
@@ -71,6 +90,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           <div class="chart-header">
             <span class="symbol-text">${symbol}</span>
             <span class="ltp-text" id="ltpHeader">₹${entryPrice.toFixed(2)}</span>
+            ${showVWAP ? '<span class="vwap-indicator">• VWAP</span>' : ''}
+            ${showEMA9 ? '<span class="ema-indicator">• EMA 9</span>' : ''}
           </div>
         </div>
 
@@ -114,6 +135,33 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
           const rawCandles = ${JSON.stringify(candles)};
           candleSeries.setData(rawCandles);
+
+          // Indicators
+          ${
+            showVWAP
+              ? `
+            const vwapSeries = chart.addLineSeries({
+              color: '#F59E0B',
+              lineWidth: 1.5,
+              title: 'VWAP',
+            });
+            vwapSeries.setData(${JSON.stringify(vwapData)});
+          `
+              : ''
+          }
+
+          ${
+            showEMA9
+              ? `
+            const ema9Series = chart.addLineSeries({
+              color: '#06B6D4',
+              lineWidth: 1.5,
+              title: 'EMA 9',
+            });
+            ema9Series.setData(${JSON.stringify(ema9Data)});
+          `
+              : ''
+          }
 
           // Lines for Entry, SL, TP
           let entryLine = null;
@@ -195,6 +243,58 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
   return (
     <View style={styles.container}>
+      {/* Top Toolbar: Timeframes & Indicator Toggles */}
+      <View style={styles.toolbar}>
+        <View style={styles.tfGroup}>
+          {['1m', '3m', '5m', '15m'].map((tf) => (
+            <TouchableOpacity
+              key={tf}
+              style={[styles.tfBtn, timeframe === tf && styles.tfBtnActive]}
+              onPress={() => onSelectTimeframe && onSelectTimeframe(tf)}
+            >
+              <Text
+                style={[
+                  styles.tfBtnText,
+                  timeframe === tf && styles.tfBtnTextActive,
+                ]}
+              >
+                {tf}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.indicatorGroup}>
+          <TouchableOpacity
+            style={[styles.indChip, showVWAP && styles.indChipActiveVWAP]}
+            onPress={onToggleVWAP}
+          >
+            <Text
+              style={[
+                styles.indChipText,
+                showVWAP && { color: '#F59E0B' },
+              ]}
+            >
+              VWAP
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.indChip, showEMA9 && styles.indChipActiveEMA]}
+            onPress={onToggleEMA9}
+          >
+            <Text
+              style={[
+                styles.indChipText,
+                showEMA9 && { color: '#06B6D4' },
+              ]}
+            >
+              EMA 9
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
       <WebViewComponent
         ref={webViewRef}
         originWhitelist={['*']}
@@ -206,6 +306,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         javaScriptEnabled={true}
         domStorageEnabled={true}
       />
+
       {/* Legend & Quick Level Bar */}
       <View style={styles.legendContainer}>
         <View style={styles.legendItem}>
@@ -238,6 +339,62 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0F172A',
     overflow: 'hidden',
+  },
+  toolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#1E293B',
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  tfGroup: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  tfBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: '#0F172A',
+  },
+  tfBtnActive: {
+    backgroundColor: '#38BDF8',
+  },
+  tfBtnText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  tfBtnTextActive: {
+    color: '#0F172A',
+  },
+  indicatorGroup: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  indChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  indChipActiveVWAP: {
+    borderColor: '#F59E0B',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+  },
+  indChipActiveEMA: {
+    borderColor: '#06B6D4',
+    backgroundColor: 'rgba(6, 182, 212, 0.15)',
+  },
+  indChipText: {
+    color: '#64748B',
+    fontSize: 9,
+    fontWeight: '700',
   },
   webview: {
     flex: 1,
