@@ -190,6 +190,15 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
             LTP: ₹{selectedContract.ltp.toFixed(2)} ({selectedContract.changePercent >= 0 ? '+' : ''}
             {selectedContract.changePercent}%) • Lot: {lotSize}
           </Text>
+          <Text style={styles.breakevenText}>
+            Breakeven Spot:{' '}
+            <Text style={styles.breakevenVal}>
+              ₹
+              {selectedContract.optionType === 'CALL'
+                ? (selectedContract.strikePrice + entryPrice).toFixed(1)
+                : (selectedContract.strikePrice - entryPrice).toFixed(1)}
+            </Text>
+          </Text>
         </View>
 
         <TouchableOpacity style={styles.chainBtn} onPress={onOpenChain}>
@@ -267,6 +276,16 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 11,
     marginTop: 1,
+  },
+  breakevenText: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  breakevenVal: {
+    color: '#F59E0B',
+    fontWeight: '700',
   },
   chainBtn: {
     backgroundColor: '#38BDF8',
