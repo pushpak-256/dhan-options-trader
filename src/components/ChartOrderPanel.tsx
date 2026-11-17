@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput } from 'react-native';
 import { TransactionType, OrderType } from '../types/dhan';
 import { OrderPreFlightValidation } from '../types/compliance';
 
@@ -22,6 +22,8 @@ interface ChartOrderPanelProps {
   validation: OrderPreFlightValidation;
   onPlaceOrder: () => void;
   isSubmitting: boolean;
+  oneClickMode?: boolean;
+  onToggleOneClickMode?: () => void;
 }
 
 const RR_PRESETS = [
@@ -29,6 +31,20 @@ const RR_PRESETS = [
   { label: '1:2', multiplier: 2 },
   { label: '1:3', multiplier: 3 },
 ] as const;
+
+const NUDGE_STEP = 0.5;
+
+function snapToTick(price: number): number {
+  return Number(Math.max(0.05, Math.round(price * 20) / 20).toFixed(2));
+}
+
+function formatPriceText(price?: number): string {
+  if (typeof price !== 'number' || !isFinite(price) || price <= 0) return '';
+  const snapped = snapToTick(price);
+  return Math.abs(snapped * 10 - Math.round(snapped * 10)) > 0.01
+    ? snapped.toFixed(2)
+    : snapped.toFixed(1);
+}
 
 export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
   transactionType,
@@ -49,7 +65,77 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
   validation,
   onPlaceOrder,
   isSubmitting,
+  oneClickMode = false,
+  onToggleOneClickMode,
 }) => {
+  const [focusedField, setFocusedField] = useState<'ENTRY' | 'SL' | 'TP' | null>(null);
+  const [entryText, setEntryText] = useState<string>(formatPriceText(entryPrice));
+  const [slText, setSlText] = useState<string>(formatPriceText(stopLossPrice));
+  const [tpText, setTpText] = useState<string>(formatPriceText(targetPrice));
+
+  useEffect(() => {
+    if (focusedField !== 'ENTRY') setEntryText(formatPriceText(entryPrice));
+  }, [entryPrice, focusedField]);
+
+  useEffect(() => {
+    if (focusedField !== 'SL') setSlText(formatPriceText(stopLossPrice));
+  }, [stopLossPrice, focusedField]);
+
+  useEffect(() => {
+    if (focusedField !== 'TP') setTpText(formatPriceText(targetPrice));
+  }, [targetPrice, focusedField]);
+
+  const cleanNumericInput = (raw: string): string => {
+    const digitsAndDot = raw.replace(/[^0-9.]/g, '');
+    const firstDot = digitsAndDot.indexOf('.');
+    if (firstDot === -1) return digitsAndDot;
+    return (
+      digitsAndDot.slice(0, firstDot + 1) +
+      digitsAndDot.slice(firstDot + 1).replace(/\./g, '')
+    );
+  };
+
+  const commitPriceField = (field: 'ENTRY' | 'SL' | 'TP', rawText: string) => {
+    const parsed = parseFloat(rawText);
+    if (isFinite(parsed) && parsed > 0) {
+      const snapped = snapToTick(parsed);
+      if (field === 'ENTRY') {
+        setEntryPrice(snapped);
+        setEntryText(formatPriceText(snapped));
+      } else if (field === 'SL') {
+        setStopLossPrice(snapped);
+        setSlText(formatPriceText(snapped));
+      } else {
+        setTargetPrice(snapped);
+        setTpText(formatPriceText(snapped));
+      }
+    } else {
+      // Restore previous valid price if input was cleared or invalid
+      if (field === 'ENTRY') setEntryText(formatPriceText(entryPrice));
+      else if (field === 'SL') setSlText(formatPriceText(stopLossPrice));
+      else setTpText(formatPriceText(targetPrice));
+    }
+  };
+
+  const nudgeLevel = (field: 'ENTRY' | 'SL' | 'TP', delta: number) => {
+    setActiveLineType(field);
+    if (field === 'ENTRY') {
+      const next = snapToTick(entryPrice + delta);
+      setEntryPrice(next);
+      setEntryText(formatPriceText(next));
+    } else if (field === 'SL') {
+      const base = stopLossPrice && stopLossPrice > 0 ? stopLossPrice : entryPrice;
+      const next = snapToTick(base + delta);
+      setStopLossPrice(next);
+      setSlText(formatPriceText(next));
+    } else {
+      const base = targetPrice && targetPrice > 0 ? targetPrice : entryPrice;
+      const next = snapToTick(base + delta);
+      setTargetPrice(next);
+      setTpText(formatPriceText(next));
+    }
+  };
+
   const totalQty = lots * lotSize;
   const estimatedCapital = (entryPrice * totalQty).toFixed(0);
 
@@ -92,16 +178,15 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         ? entryPrice + riskPts * multiplier
         : entryPrice - riskPts * multiplier;
 
-    const snappedTarget = Number(
-      Math.max(0.05, Math.round(rawTarget * 20) / 20).toFixed(2)
-    );
+    const snappedTarget = snapToTick(rawTarget);
     setTargetPrice(snappedTarget);
+    setTpText(formatPriceText(snappedTarget));
     setActiveLineType('TP');
   };
 
   return (
     <View style={styles.container}>
-      {/* Row 1: Buy/Sell and Lots Counter */}
+      {/* Row 1: Buy/Sell, 1-Click/Confirm Toggle, and Lots Counter */}
       <View style={styles.row}>
         <View style={styles.segmentedControl}>
           <TouchableOpacity
@@ -138,9 +223,28 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
           </TouchableOpacity>
         </View>
 
+        {/* 1-Click vs Confirm Execution Mode Pill */}
+        <TouchableOpacity
+          style={[
+            styles.modeTogglePill,
+            oneClickMode ? styles.modeOneClickActive : styles.modeConfirmActive,
+          ]}
+          onPress={onToggleOneClickMode}
+          disabled={!onToggleOneClickMode}
+        >
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.modeToggleText,
+              oneClickMode ? styles.modeOneClickText : styles.modeConfirmText,
+            ]}
+          >
+            {oneClickMode ? '⚡ 1-Click' : '✓ Confirm'}
+          </Text>
+        </TouchableOpacity>
+
         {/* Lots Counter */}
         <View style={styles.lotsContainer}>
-          <Text style={styles.label}>LOTS</Text>
           <View style={styles.counterRow}>
             <TouchableOpacity
               style={styles.counterBtn}
@@ -149,8 +253,8 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
               <Text style={styles.counterBtnText}>-</Text>
             </TouchableOpacity>
             <View style={styles.lotDisplay}>
-              <Text style={styles.lotText}>{lots}</Text>
-              <Text style={styles.qtySubtext}>{totalQty} qty</Text>
+              <Text style={styles.lotText}>{lots}L</Text>
+              <Text style={styles.qtySubtext}>{totalQty}</Text>
             </View>
             <TouchableOpacity
               style={styles.counterBtn}
@@ -231,72 +335,205 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         </View>
       </View>
 
-      {/* Level Selection Tabs (Tap on Chart mode) */}
+      {/* Editable Level Cards (Inline Numeric Input + Nudge ±0.5) */}
       <View style={styles.levelTabsRow}>
-        <TouchableOpacity
+        {/* ENTRY Card (Read-only MKT @ LTP in MARKET mode; editable in LIMIT mode) */}
+        <View
           style={[
             styles.levelTab,
-            activeLineType === 'ENTRY' && styles.entryActiveTab,
+            !isMarketOrder && activeLineType === 'ENTRY' && styles.entryActiveTab,
+            isMarketOrder && styles.mktEntryTab,
           ]}
-          onPress={() => setActiveLineType('ENTRY')}
         >
-          <Text style={styles.levelTabLabel}>
-            Entry ({isMarketOrder ? 'MKT' : 'LMT'})
-          </Text>
-          <Text style={styles.levelTabValue}>₹{entryPrice.toFixed(1)}</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => !isMarketOrder && setActiveLineType('ENTRY')}
+            disabled={isMarketOrder}
+          >
+            <Text style={styles.levelTabLabel} numberOfLines={1}>
+              {isMarketOrder ? 'Entry (MKT)' : 'Entry (LMT)'}
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
+          {isMarketOrder ? (
+            <View style={styles.mktReadOnlyRow}>
+              <Text style={styles.mktBadge}>MKT</Text>
+              <Text style={styles.mktPriceText} numberOfLines={1}>
+                ₹{formatPriceText(entryPrice)}
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.priceInputRow}>
+              <TouchableOpacity
+                style={styles.nudgeBtn}
+                onPress={() => nudgeLevel('ENTRY', -NUDGE_STEP)}
+              >
+                <Text style={styles.nudgeBtnText}>−</Text>
+              </TouchableOpacity>
+              <View style={styles.inputFieldWrap}>
+                <Text style={styles.rupeePrefix}>₹</Text>
+                <TextInput
+                  style={styles.levelInput}
+                  value={entryText}
+                  onFocus={() => {
+                    setFocusedField('ENTRY');
+                    setActiveLineType('ENTRY');
+                  }}
+                  onChangeText={(txt) => setEntryText(cleanNumericInput(txt))}
+                  onBlur={() => {
+                    setFocusedField(null);
+                    commitPriceField('ENTRY', entryText);
+                  }}
+                  onSubmitEditing={() => commitPriceField('ENTRY', entryText)}
+                  keyboardType="decimal-pad"
+                  returnKeyType="done"
+                  selectTextOnFocus
+                  placeholder="0.0"
+                  placeholderTextColor="#475569"
+                />
+              </View>
+              <TouchableOpacity
+                style={styles.nudgeBtn}
+                onPress={() => nudgeLevel('ENTRY', NUDGE_STEP)}
+              >
+                <Text style={styles.nudgeBtnText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        {/* STOP LOSS Card */}
+        <View
           style={[
             styles.levelTab,
             activeLineType === 'SL' && styles.slActiveTab,
             isSlInverted && styles.invalidLevelTab,
           ]}
-          onPress={() => setActiveLineType('SL')}
         >
-          <Text
-            style={[
-              styles.levelTabLabel,
-              { color: isSlInverted ? '#FBBF24' : '#F87171' },
-            ]}
-          >
-            {isSlInverted ? '⚠️ Stop Loss' : 'Stop Loss'}
-          </Text>
-          <Text
-            style={[
-              styles.levelTabValue,
-              { color: isSlInverted ? '#F59E0B' : '#EF4444' },
-            ]}
-          >
-            {stopLossPrice ? `₹${stopLossPrice.toFixed(1)}` : 'Tap Chart'}
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity onPress={() => setActiveLineType('SL')}>
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.levelTabLabel,
+                { color: isSlInverted ? '#FBBF24' : '#F87171' },
+              ]}
+            >
+              {isSlInverted ? '⚠️ Stop Loss' : 'Stop Loss'}
+            </Text>
+          </TouchableOpacity>
+          <View style={styles.priceInputRow}>
+            <TouchableOpacity
+              style={styles.nudgeBtn}
+              onPress={() => nudgeLevel('SL', -NUDGE_STEP)}
+            >
+              <Text style={styles.nudgeBtnText}>−</Text>
+            </TouchableOpacity>
+            <View style={styles.inputFieldWrap}>
+              <Text
+                style={[
+                  styles.rupeePrefix,
+                  { color: isSlInverted ? '#F59E0B' : '#EF4444' },
+                ]}
+              >
+                ₹
+              </Text>
+              <TextInput
+                style={[
+                  styles.levelInput,
+                  { color: isSlInverted ? '#F59E0B' : '#EF4444' },
+                ]}
+                value={slText}
+                onFocus={() => {
+                  setFocusedField('SL');
+                  setActiveLineType('SL');
+                }}
+                onChangeText={(txt) => setSlText(cleanNumericInput(txt))}
+                onBlur={() => {
+                  setFocusedField(null);
+                  commitPriceField('SL', slText);
+                }}
+                onSubmitEditing={() => commitPriceField('SL', slText)}
+                keyboardType="decimal-pad"
+                returnKeyType="done"
+                selectTextOnFocus
+                placeholder="Set"
+                placeholderTextColor="#64748B"
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.nudgeBtn}
+              onPress={() => nudgeLevel('SL', NUDGE_STEP)}
+            >
+              <Text style={styles.nudgeBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
-        <TouchableOpacity
+        {/* TARGET Card */}
+        <View
           style={[
             styles.levelTab,
             activeLineType === 'TP' && styles.tpActiveTab,
             isTpInverted && styles.invalidLevelTab,
           ]}
-          onPress={() => setActiveLineType('TP')}
         >
-          <Text
-            style={[
-              styles.levelTabLabel,
-              { color: isTpInverted ? '#FBBF24' : '#34D399' },
-            ]}
-          >
-            {isTpInverted ? '⚠️ Target' : 'Target'}
-          </Text>
-          <Text
-            style={[
-              styles.levelTabValue,
-              { color: isTpInverted ? '#F59E0B' : '#10B981' },
-            ]}
-          >
-            {targetPrice ? `₹${targetPrice.toFixed(1)}` : 'Tap Chart'}
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity onPress={() => setActiveLineType('TP')}>
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.levelTabLabel,
+                { color: isTpInverted ? '#FBBF24' : '#34D399' },
+              ]}
+            >
+              {isTpInverted ? '⚠️ Target' : 'Target'}
+            </Text>
+          </TouchableOpacity>
+          <View style={styles.priceInputRow}>
+            <TouchableOpacity
+              style={styles.nudgeBtn}
+              onPress={() => nudgeLevel('TP', -NUDGE_STEP)}
+            >
+              <Text style={styles.nudgeBtnText}>−</Text>
+            </TouchableOpacity>
+            <View style={styles.inputFieldWrap}>
+              <Text
+                style={[
+                  styles.rupeePrefix,
+                  { color: isTpInverted ? '#F59E0B' : '#10B981' },
+                ]}
+              >
+                ₹
+              </Text>
+              <TextInput
+                style={[
+                  styles.levelInput,
+                  { color: isTpInverted ? '#F59E0B' : '#10B981' },
+                ]}
+                value={tpText}
+                onFocus={() => {
+                  setFocusedField('TP');
+                  setActiveLineType('TP');
+                }}
+                onChangeText={(txt) => setTpText(cleanNumericInput(txt))}
+                onBlur={() => {
+                  setFocusedField(null);
+                  commitPriceField('TP', tpText);
+                }}
+                onSubmitEditing={() => commitPriceField('TP', tpText)}
+                keyboardType="decimal-pad"
+                returnKeyType="done"
+                selectTextOnFocus
+                placeholder="Set"
+                placeholderTextColor="#64748B"
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.nudgeBtn}
+              onPress={() => nudgeLevel('TP', NUDGE_STEP)}
+            >
+              <Text style={styles.nudgeBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
 
       {/* Risk-Reward & Compliance Metrics */}
@@ -374,6 +611,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 6,
     marginBottom: 8,
   },
   segmentedControl: {
@@ -381,11 +619,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#1E293B',
     borderRadius: 8,
     padding: 3,
-    width: '45%',
+    flex: 1,
+    maxWidth: 144,
   },
   segmentBtn: {
     flex: 1,
-    paddingVertical: 7,
+    paddingVertical: 6,
     alignItems: 'center',
     borderRadius: 6,
   },
@@ -398,20 +637,41 @@ const styles = StyleSheet.create({
   segmentText: {
     color: '#94A3B8',
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 12,
   },
   textWhite: {
     color: '#FFFFFF',
   },
+  modeTogglePill: {
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 7,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modeOneClickActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderColor: '#F59E0B',
+  },
+  modeConfirmActive: {
+    backgroundColor: 'rgba(56, 189, 248, 0.14)',
+    borderColor: '#38BDF8',
+  },
+  modeToggleText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  modeOneClickText: {
+    color: '#FBBF24',
+  },
+  modeConfirmText: {
+    color: '#7DD3FC',
+  },
   lotsContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-  },
-  label: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '700',
   },
   counterRow: {
     flexDirection: 'row',
@@ -421,8 +681,8 @@ const styles = StyleSheet.create({
     padding: 2,
   },
   counterBtn: {
-    width: 32,
-    height: 32,
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#334155',
@@ -430,16 +690,17 @@ const styles = StyleSheet.create({
   },
   counterBtnText: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
   },
   lotDisplay: {
-    paddingHorizontal: 10,
+    paddingHorizontal: 7,
     alignItems: 'center',
+    minWidth: 36,
   },
   lotText: {
     color: '#F8FAFC',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '800',
   },
   qtySubtext: {
@@ -516,14 +777,15 @@ const styles = StyleSheet.create({
   },
   levelTabsRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 6,
     marginBottom: 8,
   },
   levelTab: {
     flex: 1,
+    minWidth: 0,
     backgroundColor: '#1E293B',
-    paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 4,
     borderRadius: 6,
     borderWidth: 1.5,
     borderColor: 'transparent',
@@ -532,6 +794,34 @@ const styles = StyleSheet.create({
   entryActiveTab: {
     borderColor: '#38BDF8',
     backgroundColor: 'rgba(56, 189, 248, 0.1)',
+  },
+  mktEntryTab: {
+    borderColor: 'rgba(245, 158, 11, 0.35)',
+    backgroundColor: 'rgba(15, 23, 42, 0.7)',
+  },
+  mktReadOnlyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    height: 22,
+    marginTop: 3,
+    width: '100%',
+  },
+  mktBadge: {
+    color: '#0F172A',
+    backgroundColor: '#FBBF24',
+    fontSize: 9,
+    fontWeight: '800',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  mktPriceText: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: '800',
   },
   slActiveTab: {
     borderColor: '#EF4444',
@@ -549,6 +839,56 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 10,
     fontWeight: '600',
+  },
+  priceInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: 3,
+    gap: 2,
+  },
+  nudgeBtn: {
+    width: 20,
+    height: 22,
+    borderRadius: 4,
+    backgroundColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  nudgeBtnText: {
+    color: '#E2E8F0',
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 15,
+  },
+  inputFieldWrap: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    height: 22,
+  },
+  rupeePrefix: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+    marginRight: 1,
+  },
+  levelInput: {
+    flex: 1,
+    minWidth: 0,
+    color: '#F8FAFC',
+    fontSize: 11,
+    fontWeight: '800',
+    paddingVertical: 0,
+    paddingHorizontal: 1,
+    textAlign: 'center',
   },
   levelTabValue: {
     color: '#F8FAFC',

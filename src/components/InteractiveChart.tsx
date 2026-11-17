@@ -1,21 +1,36 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { View, StyleSheet, Text, TouchableOpacity, Platform, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
-import { CandleData, TransactionType, DhanPosition } from '../types/dhan';
-import { calculateVWAP, calculateEMA } from '../utils/indicators';
+import { CandleData, TransactionType, DhanPosition, OrderType } from '../types/dhan';
 
-export type DrawingTool = 'DRAG' | 'TPSL' | 'HLINE' | 'TRENDLINE';
+export type DrawingTool =
+  | 'POINTER'
+  | 'DRAG'
+  | 'TPSL'
+  | 'HLINE'
+  | 'TRENDLINE'
+  | 'RAY'
+  | 'CHANNEL'
+  | 'FIB';
+
+export interface LiveChartTick {
+  price: number;
+  volume?: number;
+  timestamp: number;
+}
 
 interface InteractiveChartProps {
   candles: CandleData[];
   symbol: string;
   transactionType: TransactionType;
+  orderType?: OrderType;
   entryPrice: number;
   stopLossPrice?: number;
   targetPrice?: number;
   lotSize: number;
   lots: number;
   activePosition?: DhanPosition | null;
+  latestTick?: LiveChartTick | null;
   onLevelChange?: (line: 'ENTRY' | 'SL' | 'TP', price: number) => void;
   onQuickOrder?: (side: TransactionType, price: number) => void;
   onQuickExitPosition?: (pos: DhanPosition) => void;
@@ -29,16 +44,20 @@ interface InteractiveChartProps {
   onToggleEMA9?: () => void;
 }
 
+const OPACITY_STEPS = [1.0, 0.65, 0.35, 0.15] as const;
+
 export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   candles,
   symbol,
   transactionType,
+  orderType = 'LIMIT',
   entryPrice,
   stopLossPrice,
   targetPrice,
   lotSize,
   lots,
   activePosition,
+  latestTick,
   onLevelChange,
   onQuickOrder,
   onQuickExitPosition,
@@ -55,9 +74,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const iframeRef = useRef<any>(null);
   const WebViewComponent: any = WebView;
 
-  const [activeTool, setActiveTool] = useState<DrawingTool>('DRAG');
+  // Additional native KLineChart indicator toggles (main & sub-panes)
+  const [showBOLL, setShowBOLL] = useState<boolean>(false);
+  const [showVOL, setShowVOL] = useState<boolean>(true);
+  const [showRSI, setShowRSI] = useState<boolean>(false);
+
+  // Order line & shaded TP/SL zone opacity control (100% -> 65% -> 35% -> 15%)
+  const [opacityIndex, setOpacityIndex] = useState<number>(0);
+  const overlayOpacity = OPACITY_STEPS[opacityIndex];
+
   const [showTpSlBox, setShowTpSlBox] = useState<boolean>(true);
-  const [drawingCount, setDrawingCount] = useState<number>(0);
 
   const totalQty = lotSize * lots;
 
@@ -105,53 +131,77 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     postToChart({
       type: 'SYNC_STATE',
       side: transactionType,
+      orderType,
       entry: entryPrice,
       sl: stopLossPrice || 0,
       tp: targetPrice || 0,
       totalQty,
       showTpSlBox,
-      tool: activeTool,
+      overlayOpacity,
+      timeframe,
       activeLineType,
-      activePosition: activePosition && activePosition.netQty !== 0
-        ? {
-            avgPrice: activePosition.netQty > 0 ? activePosition.buyAvg : activePosition.sellAvg,
-            netQty: activePosition.netQty,
-            pnl: activePosition.unrealizedProfit,
-          }
-        : null,
+      indicators: {
+        vwap: showVWAP,
+        ema: showEMA9,
+        boll: showBOLL,
+        vol: showVOL,
+        rsi: showRSI,
+      },
+      activePosition:
+        activePosition && activePosition.netQty !== 0
+          ? {
+              avgPrice: activePosition.netQty > 0 ? activePosition.buyAvg : activePosition.sellAvg,
+              netQty: activePosition.netQty,
+              pnl: activePosition.unrealizedProfit,
+            }
+          : null,
     });
   }, [
     postToChart,
     transactionType,
+    orderType,
     entryPrice,
     stopLossPrice,
     targetPrice,
     totalQty,
     showTpSlBox,
-    activeTool,
+    overlayOpacity,
+    timeframe,
     activeLineType,
+    showVWAP,
+    showEMA9,
+    showBOLL,
+    showVOL,
+    showRSI,
     activePosition,
   ]);
 
-  // Sync dynamic state (Entry, SL, TP, side, qty, tool, active position) smoothly to chart
+  // Sync dynamic state smoothly to KLineChart without reloading
   useEffect(() => {
     syncStateToChart();
   }, [syncStateToChart]);
 
-  const handleUndoDrawing = () => {
-    postToChart({ type: 'UNDO_DRAWING' });
+  // Stream real-time tick-by-tick updates without reloading chart
+  useEffect(() => {
+    if (!latestTick || !latestTick.price || latestTick.price <= 0) return;
+    postToChart({
+      type: 'LIVE_TICK',
+      price: latestTick.price,
+      volume: latestTick.volume,
+      timestamp: latestTick.timestamp,
+    });
+  }, [latestTick, postToChart]);
+
+  const handleCycleOpacity = () => {
+    setOpacityIndex((prev) => (prev + 1) % OPACITY_STEPS.length);
   };
 
-  const handleClearDrawings = () => {
-    postToChart({ type: 'CLEAR_DRAWINGS' });
-    setDrawingCount(0);
-    setActiveTool('DRAG');
+  const handleResetChart = () => {
+    postToChart({ type: 'RESET_CHART' });
   };
 
-  // Build HTML only when candles/symbol/indicators change (never on drag!)
+  // Build HTML only when candles or symbol change (never on drag, ticks, opacity, or indicators!)
   const chartHtml = useMemo(() => {
-    const vwapData = showVWAP ? calculateVWAP(candles) : [];
-    const ema9Data = showEMA9 ? calculateEMA(candles, 9) : [];
     const initialEntry = candles.length > 0 ? candles[candles.length - 1].close : entryPrice;
     const safeSymbol = String(symbol)
       .replace(/&/g, '&amp;')
@@ -161,126 +211,313 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       .replace(/'/g, '&#39;');
     const safeJson = (val: unknown) => JSON.stringify(val).replace(/</g, '\\u003c');
 
+    const klineInitialData = candles.map((c) => ({
+      timestamp: c.time < 1e12 ? c.time * 1000 : c.time,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: typeof c.volume === 'number' && c.volume > 0 ? c.volume : 100,
+    }));
+
     return `<!DOCTYPE html>
 <html>
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/klinecharts@9.8.12/dist/umd/klinecharts.min.js"></script>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
-      body, html { width: 100%; height: 100%; background-color: #0F172A; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-      #wrapper { width: 100%; height: 100%; position: relative; }
-      #chartContainer { width: 100%; height: 100%; position: absolute; inset: 0; }
-      #overlayCanvas { width: 100%; height: 100%; position: absolute; inset: 0; z-index: 15; pointer-events: none; }
-      #interactionLayer { width: 100%; height: 100%; position: absolute; inset: 0; z-index: 16; pointer-events: none; }
+      body, html {
+        width: 100%;
+        height: 100%;
+        background-color: #0F172A;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: row;
+        background: #0F172A;
+      }
+      /* TradingView-style Left Vertical Drawing Rail */
+      #drawRail {
+        width: 38px;
+        flex-shrink: 0;
+        height: 100%;
+        background: #0B1120;
+        border-right: 1px solid #1E293B;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 4px 2px;
+        gap: 3px;
+        overflow-y: auto;
+        scrollbar-width: none;
+        z-index: 40;
+      }
+      #drawRail::-webkit-scrollbar { display: none; }
+      .rail-btn {
+        width: 30px;
+        height: 28px;
+        flex-shrink: 0;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: #94A3B8;
+        font-size: 13px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.12s, color 0.12s, border-color 0.12s;
+        position: relative;
+      }
+      .rail-btn:hover { background: #1E293B; color: #F8FAFC; }
+      .rail-btn:active { transform: scale(0.93); }
+      .rail-btn.active {
+        background: rgba(56, 189, 248, 0.2);
+        border-color: #38BDF8;
+        color: #38BDF8;
+      }
+      .rail-btn.active-green {
+        background: rgba(16, 185, 129, 0.18);
+        border-color: #10B981;
+        color: #34D399;
+      }
+      .rail-btn.active-amber {
+        background: rgba(245, 158, 11, 0.18);
+        border-color: #F59E0B;
+        color: #FBBF24;
+      }
+      .rail-btn.active-red {
+        background: rgba(239, 68, 68, 0.16);
+        border-color: #EF4444;
+        color: #F87171;
+      }
+      .rail-btn.dimmed { opacity: 0.42; }
+      .rail-sep {
+        width: 22px;
+        height: 1px;
+        background: #1E293B;
+        margin: 2px 0;
+        flex-shrink: 0;
+      }
+      .rail-badge {
+        position: absolute;
+        top: 1px;
+        right: 1px;
+        min-width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: #EF4444;
+        color: #FFFFFF;
+        font-size: 8px;
+        font-weight: 800;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 0 2px;
+      }
+      /* Main Chart Area right of Left Rail */
+      #chartArea {
+        flex: 1;
+        min-width: 0;
+        height: 100%;
+        position: relative;
+        overflow: hidden;
+      }
+      #klineContainer {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        inset: 0;
+      }
+      #overlayCanvas {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        inset: 0;
+        z-index: 15;
+        pointer-events: none;
+      }
       .chart-header {
         position: absolute;
-        top: 6px;
-        left: 8px;
+        top: 5px;
+        left: 6px;
         z-index: 25;
         display: flex;
         align-items: center;
         gap: 6px;
-        background: rgba(15, 23, 42, 0.85);
-        padding: 4px 8px;
+        background: rgba(15, 23, 42, 0.86);
+        padding: 3px 8px;
         border-radius: 6px;
-        border: 1px solid rgba(255,255,255,0.08);
+        border: 1px solid rgba(148, 163, 184, 0.18);
         pointer-events: none;
-        max-width: calc(100% - 230px);
+        max-width: calc(100% - 210px);
         overflow: hidden;
         white-space: nowrap;
       }
-      .symbol-text { color: #F8FAFC; font-weight: 700; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
-      .ltp-text { color: #38BDF8; font-weight: 700; font-size: 11px; flex-shrink: 0; }
-      .vwap-indicator { color: #F59E0B; font-size: 9px; font-weight: 700; flex-shrink: 0; }
-      .ema-indicator { color: #06B6D4; font-size: 9px; font-weight: 700; flex-shrink: 0; }
+      .symbol-text {
+        color: #F8FAFC;
+        font-weight: 700;
+        font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .ltp-text {
+        color: #38BDF8;
+        font-weight: 800;
+        font-size: 11px;
+        flex-shrink: 0;
+        transition: color 0.15s;
+      }
+      .ltp-up { color: #34D399 !important; }
+      .ltp-down { color: #F87171 !important; }
       .quick-order-bar {
         position: absolute;
-        top: 6px;
-        right: 68px;
+        top: 5px;
+        right: 64px;
         z-index: 30;
         display: flex;
-        gap: 6px;
+        gap: 5px;
         align-items: center;
       }
       .qbtn {
         border: none;
         border-radius: 5px;
-        padding: 4px 9px;
+        padding: 4px 8px;
         font-size: 10px;
         font-weight: 800;
         color: #FFFFFF;
         cursor: pointer;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-        letter-spacing: 0.3px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.42);
+        letter-spacing: 0.25px;
         white-space: nowrap;
       }
-      .qbtn:active { transform: scale(0.95); }
+      .qbtn:active { transform: scale(0.94); }
       .qbtn-buy { background: rgba(16, 185, 129, 0.92); border: 1px solid #34D399; }
       .qbtn-sell { background: rgba(239, 68, 68, 0.92); border: 1px solid #F87171; }
-      .qbtn-exit { background: rgba(245, 158, 11, 0.95); color: #0F172A; border: 1px solid #FDE047; }
+      .qbtn-exit { background: rgba(245, 158, 11, 0.96); color: #0F172A; border: 1px solid #FDE047; }
       .hint-pill {
         position: absolute;
-        bottom: 32px;
-        left: 8px;
+        bottom: 28px;
+        left: 6px;
         z-index: 25;
-        background: rgba(15, 23, 42, 0.85);
+        background: rgba(15, 23, 42, 0.86);
         color: #94A3B8;
         font-size: 10px;
         font-weight: 600;
         padding: 3px 8px;
         border-radius: 4px;
-        border: 1px solid rgba(148, 163, 184, 0.25);
+        border: 1px solid rgba(148, 163, 184, 0.22);
         pointer-events: none;
-        max-width: calc(100% - 82px);
+        max-width: calc(100% - 112px);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .floating-reset-btn {
+        position: absolute;
+        bottom: 28px;
+        right: 66px;
+        z-index: 30;
+        width: 26px;
+        height: 24px;
+        border-radius: 5px;
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        background: rgba(15, 23, 42, 0.9);
+        color: #38BDF8;
+        font-size: 13px;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+      }
+      .floating-reset-btn:hover { background: #1E293B; color: #7DD3FC; }
+      .floating-reset-btn:active { transform: scale(0.92); }
       @media (max-width: 440px) {
-        .chart-header {
-          padding: 3px 6px;
-          gap: 4px;
-          max-width: calc(100% - 205px);
-        }
+        #drawRail { width: 32px; padding: 3px 1px; gap: 2px; }
+        .rail-btn { width: 26px; height: 25px; font-size: 12px; }
+        .chart-header { padding: 2px 6px; gap: 4px; max-width: calc(100% - 178px); }
         .symbol-text, .ltp-text { font-size: 10px; }
-        .vwap-indicator, .ema-indicator { display: none; }
-        .quick-order-bar { right: 64px; gap: 4px; }
+        .quick-order-bar { right: 56px; gap: 3px; }
         .qbtn { padding: 3px 6px; font-size: 9px; letter-spacing: 0.1px; }
-        .hint-pill { font-size: 9px; padding: 2px 6px; bottom: 28px; }
+        .hint-pill { font-size: 9px; padding: 2px 6px; bottom: 26px; max-width: calc(100% - 96px); }
+        .floating-reset-btn { bottom: 26px; right: 58px; width: 24px; height: 22px; font-size: 12px; }
       }
     </style>
   </head>
   <body>
-    <div id="wrapper">
-      <div id="chartContainer"></div>
-      <canvas id="overlayCanvas"></canvas>
-
-      <div class="chart-header">
-        <span class="symbol-text">${safeSymbol}</span>
-        <span class="ltp-text" id="ltpHeader">₹${initialEntry.toFixed(2)}</span>
-        ${showVWAP ? '<span class="vwap-indicator">• VWAP</span>' : ''}
-        ${showEMA9 ? '<span class="ema-indicator">• EMA 9</span>' : ''}
+    <div id="app">
+      <!-- TradingView-style Left Vertical Drawing Toolbar -->
+      <div id="drawRail" role="toolbar" aria-label="Drawing tools">
+        <button class="rail-btn active" id="toolPointer" title="Pointer / Crosshair (Select & Drag)">✛</button>
+        <button class="rail-btn" id="toolSegment" title="Trendline">╱</button>
+        <button class="rail-btn" id="toolRay" title="Ray">↗</button>
+        <button class="rail-btn" id="toolHLine" title="Horizontal Line">━</button>
+        <button class="rail-btn" id="toolChannel" title="Parallel Channel">║</button>
+        <button class="rail-btn" id="toolFib" title="Fibonacci Retracement">≡</button>
+        <div class="rail-sep"></div>
+        <button class="rail-btn active-green" id="toolTpSl" title="Toggle TP / SL Risk-Reward Box">📐</button>
+        <button class="rail-btn" id="toolMagnet" title="Magnet Snap to OHLC">🧲</button>
+        <div class="rail-sep"></div>
+        <button class="rail-btn dimmed" id="toolDeleteSel" title="Delete Selected Drawing">⌫</button>
+        <button class="rail-btn dimmed" id="toolUndo" title="Undo Last Drawing">↩️</button>
+        <button class="rail-btn dimmed" id="toolClear" title="Clear All Drawings">🗑️<span class="rail-badge" id="drawBadge">0</span></button>
       </div>
 
-      <div class="quick-order-bar">
-        <button class="qbtn qbtn-buy" id="btnQuickBuy">BUY</button>
-        <button class="qbtn qbtn-sell" id="btnQuickSell">SELL</button>
-        <button class="qbtn qbtn-exit" id="btnQuickExit" style="display:none;">✕ EXIT</button>
-      </div>
+      <!-- KLineChart + Draggable Order Levels Overlay -->
+      <div id="chartArea">
+        <div id="klineContainer"></div>
+        <canvas id="overlayCanvas"></canvas>
 
-      <div class="hint-pill" id="hintPill">✋ Drag ENTRY / SL / TP handles directly on chart</div>
+        <div class="chart-header">
+          <span class="symbol-text">${safeSymbol}</span>
+          <span class="ltp-text" id="ltpHeader">₹${initialEntry.toFixed(2)}</span>
+        </div>
+
+        <div class="quick-order-bar">
+          <button class="qbtn qbtn-buy" id="btnQuickBuy">BUY</button>
+          <button class="qbtn qbtn-sell" id="btnQuickSell">SELL</button>
+          <button class="qbtn qbtn-exit" id="btnQuickExit" style="display:none;">✕ EXIT</button>
+        </div>
+
+        <div class="hint-pill" id="hintPill">✛ Drag ENTRY / SL / TP handles or pick a drawing tool</div>
+        <button class="floating-reset-btn" id="btnResetChart" title="Auto-fit & Reset Chart View">⟲</button>
+      </div>
     </div>
 
     <script>
-      const wrapper = document.getElementById('wrapper');
-      const container = document.getElementById('chartContainer');
+      const chartArea = document.getElementById('chartArea');
+      const klineContainer = document.getElementById('klineContainer');
       const canvas = document.getElementById('overlayCanvas');
       const ctx = canvas.getContext('2d');
+      const ltpHeader = document.getElementById('ltpHeader');
       const hintPill = document.getElementById('hintPill');
       const btnQuickBuy = document.getElementById('btnQuickBuy');
       const btnQuickSell = document.getElementById('btnQuickSell');
       const btnQuickExit = document.getElementById('btnQuickExit');
+      const btnResetChart = document.getElementById('btnResetChart');
+      const drawBadge = document.getElementById('drawBadge');
+
+      const railBtns = {
+        POINTER: document.getElementById('toolPointer'),
+        segment: document.getElementById('toolSegment'),
+        rayLine: document.getElementById('toolRay'),
+        horizontalStraightLine: document.getElementById('toolHLine'),
+        parallelStraightLine: document.getElementById('toolChannel'),
+        fibonacciLine: document.getElementById('toolFib'),
+        TPSL: document.getElementById('toolTpSl'),
+        MAGNET: document.getElementById('toolMagnet'),
+        DELETE_SEL: document.getElementById('toolDeleteSel'),
+        UNDO: document.getElementById('toolUndo'),
+        CLEAR: document.getElementById('toolClear'),
+      };
 
       function sendToHost(obj) {
         const msg = JSON.stringify(obj);
@@ -291,115 +528,520 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         }
       }
 
-      const chart = LightweightCharts.createChart(container, {
-        width: container.clientWidth,
-        height: container.clientHeight,
-        layout: {
-          background: { color: '#0F172A' },
-          textColor: '#94A3B8',
-        },
-        grid: {
-          vertLines: { color: '#1E293B' },
-          horzLines: { color: '#1E293B' },
-        },
-        crosshair: {
-          mode: LightweightCharts.CrosshairMode.Normal,
-          vertLine: { color: '#475569', width: 1, style: 1 },
-          horzLine: { color: '#475569', width: 1, style: 1 },
-        },
-        timeScale: {
-          borderColor: '#334155',
-          timeVisible: true,
-          secondsVisible: false,
-          rightOffset: 8,
-        },
-        rightPriceScale: {
-          borderColor: '#334155',
-          scaleMargins: { top: 0.16, bottom: 0.22 },
-        },
-      });
-
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: '#10B981',
-        downColor: '#EF4444',
-        borderUpColor: '#10B981',
-        borderDownColor: '#EF4444',
-        wickUpColor: '#10B981',
-        wickDownColor: '#EF4444',
-      });
-
-      const rawCandles = ${safeJson(candles)};
-      candleSeries.setData(rawCandles);
-
-      ${
-        showVWAP
-          ? `
-        const vwapSeries = chart.addLineSeries({
-          color: '#F59E0B',
-          lineWidth: 1.5,
-          title: 'VWAP',
+      // Register custom native VWAP indicator in KLineChart v9
+      if (window.klinecharts && typeof klinecharts.registerIndicator === 'function') {
+        klinecharts.registerIndicator({
+          name: 'VWAP',
+          shortName: 'VWAP',
+          series: 'price',
+          precision: 2,
+          figures: [{ key: 'vwap', title: 'VWAP: ', type: 'line' }],
+          styles: {
+            lines: [
+              {
+                style: 'solid',
+                smooth: false,
+                size: 1.5,
+                dashedValue: [2, 2],
+                color: '#F59E0B',
+              },
+            ],
+          },
+          calc: (dataList) => {
+            let cumPV = 0;
+            let cumVol = 0;
+            return dataList.map((k) => {
+              const typical = (k.high + k.low + k.close) / 3;
+              const vol = k.volume && k.volume > 0 ? k.volume : 1;
+              cumPV += typical * vol;
+              cumVol += vol;
+              return { vwap: cumVol > 0 ? cumPV / cumVol : k.close };
+            });
+          },
         });
-        vwapSeries.setData(${safeJson(vwapData)});
-      `
-          : ''
       }
 
-      ${
-        showEMA9
-          ? `
-        const ema9Series = chart.addLineSeries({
-          color: '#06B6D4',
-          lineWidth: 1.5,
-          title: 'EMA 9',
-        });
-        ema9Series.setData(${safeJson(ema9Data)});
-      `
-          : ''
+      // Initialize KLineChart v9 in TradingView Dark theme
+      const chart = klinecharts.init(klineContainer, {
+        styles: {
+          grid: {
+            show: true,
+            horizontal: { show: true, size: 1, color: '#1E293B', style: 'solid', dashedValue: [2, 2] },
+            vertical: { show: true, size: 1, color: '#1E293B', style: 'solid', dashedValue: [2, 2] },
+          },
+          candle: {
+            type: 'candle_solid',
+            bar: {
+              upColor: '#10B981',
+              downColor: '#EF4444',
+              noChangeColor: '#64748B',
+              upBorderColor: '#10B981',
+              downBorderColor: '#EF4444',
+              noChangeBorderColor: '#64748B',
+              upWickColor: '#10B981',
+              downWickColor: '#EF4444',
+              noChangeWickColor: '#64748B',
+            },
+            priceMark: {
+              show: true,
+              high: { show: true, color: '#94A3B8', textOffset: 4, textSize: 9, textFamily: 'sans-serif', textWeight: '600' },
+              low: { show: true, color: '#94A3B8', textOffset: 4, textSize: 9, textFamily: 'sans-serif', textWeight: '600' },
+              last: {
+                show: true,
+                upColor: '#10B981',
+                downColor: '#EF4444',
+                noChangeColor: '#38BDF8',
+                line: { show: true, style: 'dashed', dashedValue: [4, 4], size: 1 },
+                text: {
+                  show: true,
+                  style: 'fill',
+                  size: 10,
+                  paddingLeft: 4,
+                  paddingTop: 2,
+                  paddingRight: 4,
+                  paddingBottom: 2,
+                  color: '#FFFFFF',
+                  family: 'sans-serif',
+                  weight: '700',
+                  borderRadius: 3,
+                },
+              },
+            },
+            tooltip: {
+              showRule: 'follow_cross',
+              showType: 'standard',
+              offsetTop: 30,
+              offsetLeft: 6,
+              text: { size: 10, family: 'sans-serif', weight: '600', color: '#CBD5E1', marginLeft: 6, marginTop: 2, marginRight: 4, marginBottom: 2 },
+            },
+          },
+          indicator: {
+            ohlc: { upColor: 'rgba(16, 185, 129, 0.7)', downColor: 'rgba(239, 68, 68, 0.7)', noChangeColor: '#64748B' },
+            bars: [
+              {
+                style: 'fill',
+                borderStyle: 'solid',
+                borderSize: 1,
+                borderDashedValue: [2, 2],
+                upColor: 'rgba(16, 185, 129, 0.48)',
+                downColor: 'rgba(239, 68, 68, 0.48)',
+                noChangeColor: 'rgba(100, 116, 139, 0.48)',
+              },
+            ],
+            lines: [
+              { style: 'solid', smooth: false, size: 1.5, dashedValue: [2, 2], color: '#06B6D4' },
+              { style: 'solid', smooth: false, size: 1.5, dashedValue: [2, 2], color: '#A855F7' },
+              { style: 'solid', smooth: false, size: 1.2, dashedValue: [2, 2], color: '#F59E0B' },
+              { style: 'solid', smooth: false, size: 1.2, dashedValue: [2, 2], color: '#EC4899' },
+            ],
+            tooltip: {
+              showRule: 'always',
+              showType: 'standard',
+              showName: true,
+              showParams: true,
+              offsetTop: 28,
+              offsetLeft: 6,
+              text: { size: 9, family: 'sans-serif', weight: '600', color: '#94A3B8', marginTop: 2, marginRight: 6, marginBottom: 2, marginLeft: 4 },
+            },
+          },
+          xAxis: {
+            show: true,
+            axisLine: { show: true, color: '#334155', size: 1 },
+            tickText: { show: true, color: '#94A3B8', family: 'sans-serif', weight: '500', size: 10 },
+            tickLine: { show: true, size: 1, length: 3, color: '#334155' },
+          },
+          yAxis: {
+            show: true,
+            position: 'right',
+            type: 'normal',
+            inside: false,
+            axisLine: { show: true, color: '#334155', size: 1 },
+            tickText: { show: true, color: '#94A3B8', family: 'sans-serif', weight: '600', size: 10 },
+            tickLine: { show: true, size: 1, length: 3, color: '#334155' },
+          },
+          separator: {
+            size: 1,
+            color: '#1E293B',
+            fill: true,
+            activeBackgroundColor: 'rgba(56, 189, 248, 0.25)',
+          },
+          crosshair: {
+            show: true,
+            horizontal: {
+              show: true,
+              line: { show: true, style: 'dashed', dashedValue: [4, 3], size: 1, color: '#64748B' },
+              text: { show: true, style: 'fill', color: '#F8FAFC', size: 10, family: 'sans-serif', weight: '700', backgroundColor: '#1E293B', borderColor: '#38BDF8', borderSize: 1, borderRadius: 3 },
+            },
+            vertical: {
+              show: true,
+              line: { show: true, style: 'dashed', dashedValue: [4, 3], size: 1, color: '#64748B' },
+              text: { show: true, style: 'fill', color: '#F8FAFC', size: 10, family: 'sans-serif', weight: '600', backgroundColor: '#1E293B', borderColor: '#334155', borderSize: 1, borderRadius: 3 },
+            },
+          },
+          overlay: {
+            point: {
+              color: '#38BDF8',
+              borderColor: 'rgba(56, 189, 248, 0.35)',
+              borderSize: 2,
+              radius: 4.5,
+              activeColor: '#F59E0B',
+              activeBorderColor: 'rgba(245, 158, 11, 0.45)',
+              activeBorderSize: 3,
+              activeRadius: 6,
+            },
+            line: { style: 'solid', smooth: false, color: '#38BDF8', size: 1.6, dashedValue: [4, 3] },
+            rect: { style: 'fill', color: 'rgba(56, 189, 248, 0.14)', borderColor: '#38BDF8', borderSize: 1 },
+            polygon: { style: 'fill', color: 'rgba(56, 189, 248, 0.14)', borderColor: '#38BDF8', borderSize: 1 },
+            text: { style: 'fill', color: '#F8FAFC', size: 10, family: 'sans-serif', weight: '700', backgroundColor: 'rgba(15, 23, 42, 0.85)', borderRadius: 3, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 },
+          },
+        },
+      });
+
+      chart.setPriceVolumePrecision(2, 0);
+      try { chart.setTimezone('Asia/Kolkata'); } catch (e) {}
+      chart.setOffsetRightDistance(56);
+
+      const klineBars = ${safeJson(klineInitialData)};
+      if (klineBars.length > 0) {
+        chart.applyNewData(klineBars);
       }
 
       // Mutable interactive state
       const state = {
         side: ${safeJson(transactionType)},
+        orderType: ${safeJson(orderType)},
         entry: ${Number(entryPrice) || 0},
         sl: ${Number(stopLossPrice) || 0},
         tp: ${Number(targetPrice) || 0},
         totalQty: ${Number(totalQty) || 0},
         showTpSlBox: true,
-        tool: 'DRAG',
+        overlayOpacity: 1.0,
+        timeframe: ${safeJson(timeframe)},
         activeLineType: ${safeJson(activeLineType)},
         activePosition: null,
-        hLines: [], // [{ id, price }]
-        trendLines: [], // [{ id, p1: {time, price}, p2: {time, price} }]
-        drawingHistory: [], // ['HLINE' | 'TRENDLINE']
-        pendingTrendStart: null,
+        magnet: false,
+        lastLtp: klineBars.length > 0 ? klineBars[klineBars.length - 1].close : (${Number(entryPrice) || 0}),
+        livePrice: klineBars.length > 0 ? klineBars[klineBars.length - 1].close : (${Number(entryPrice) || 0}),
       };
 
-      // Drag tracking
-      let draggingTarget = null; // { type: 'ENTRY'|'SL'|'TP'|'HLINE', index?: number }
-      let pointerPos = { x: 0, y: 0 };
+      function getEffectiveEntryPrice() {
+        if (state.orderType === 'MARKET') {
+          return state.livePrice > 0 ? state.livePrice : (state.lastLtp > 0 ? state.lastLtp : state.entry);
+        }
+        return state.entry;
+      }
 
+      function updateQuickOrderButtons() {
+        const isMarket = state.orderType === 'MARKET';
+        const px = getEffectiveEntryPrice();
+        btnQuickBuy.textContent = (isMarket ? 'BUY MKT ₹' : 'BUY ₹') + px.toFixed(1);
+        btnQuickSell.textContent = (isMarket ? 'SELL MKT ₹' : 'SELL ₹') + px.toFixed(1);
+      }
+
+      // Native KLineChart indicator state
+      const indicatorState = {
+        vwap: false,
+        ema: false,
+        boll: false,
+        vol: false,
+        rsi: false,
+        volPaneId: null,
+        rsiPaneId: null,
+      };
+
+      function syncIndicators(ind) {
+        if (!ind) return;
+        // Main pane: VWAP
+        if (!!ind.vwap !== indicatorState.vwap) {
+          if (ind.vwap) {
+            chart.createIndicator('VWAP', true, { id: 'candle_pane' });
+          } else {
+            chart.removeIndicator('candle_pane', 'VWAP');
+          }
+          indicatorState.vwap = !!ind.vwap;
+        }
+        // Main pane: EMA (9, 21)
+        if (!!ind.ema !== indicatorState.ema) {
+          if (ind.ema) {
+            chart.createIndicator({ name: 'EMA', calcParams: [9, 21] }, true, { id: 'candle_pane' });
+          } else {
+            chart.removeIndicator('candle_pane', 'EMA');
+          }
+          indicatorState.ema = !!ind.ema;
+        }
+        // Main pane: BOLL
+        if (!!ind.boll !== indicatorState.boll) {
+          if (ind.boll) {
+            chart.createIndicator('BOLL', true, { id: 'candle_pane' });
+          } else {
+            chart.removeIndicator('candle_pane', 'BOLL');
+          }
+          indicatorState.boll = !!ind.boll;
+        }
+        // Sub-pane: VOL
+        if (!!ind.vol !== indicatorState.vol) {
+          if (ind.vol) {
+            indicatorState.volPaneId = chart.createIndicator('VOL', false, { height: 64, minHeight: 44 });
+          } else if (indicatorState.volPaneId) {
+            chart.removeIndicator(indicatorState.volPaneId, 'VOL');
+            indicatorState.volPaneId = null;
+          }
+          indicatorState.vol = !!ind.vol;
+        }
+        // Sub-pane: RSI (14)
+        if (!!ind.rsi !== indicatorState.rsi) {
+          if (ind.rsi) {
+            indicatorState.rsiPaneId = chart.createIndicator(
+              { name: 'RSI', calcParams: [14] },
+              false,
+              { height: 70, minHeight: 48 }
+            );
+          } else if (indicatorState.rsiPaneId) {
+            chart.removeIndicator(indicatorState.rsiPaneId, 'RSI');
+            indicatorState.rsiPaneId = null;
+          }
+          indicatorState.rsi = !!ind.rsi;
+        }
+        setTimeout(() => drawOverlay(), 30);
+      }
+
+      // Native KLineChart drawing state
+      let activeDrawTool = 'POINTER'; // 'POINTER' | overlay name
+      let activePendingOverlayId = null;
+      let selectedOverlayId = null;
+      let overlayHistory = []; // overlay IDs in chronological creation order
+
+      const TOOL_HINTS = {
+        POINTER: '✛ Drag ENTRY / SL / TP handles or click drawings to adjust',
+        segment: '╱ Tap start & end point to draw Trendline',
+        rayLine: '↗ Tap anchor & direction point to draw Ray',
+        horizontalStraightLine: '━ Tap chart to place Horizontal S/R Line',
+        parallelStraightLine: '║ Tap 2 points for line, then 3rd for Channel width',
+        fibonacciLine: '≡ Tap swing High & Low to draw Fibonacci Retracement',
+      };
+
+      function updateToolbarUI() {
+        const drawTools = ['POINTER', 'segment', 'rayLine', 'horizontalStraightLine', 'parallelStraightLine', 'fibonacciLine'];
+        drawTools.forEach((k) => {
+          if (railBtns[k]) {
+            railBtns[k].classList.toggle('active', activeDrawTool === k);
+          }
+        });
+        if (railBtns.TPSL) {
+          railBtns.TPSL.classList.toggle('active-green', !!state.showTpSlBox);
+        }
+        if (railBtns.MAGNET) {
+          railBtns.MAGNET.classList.toggle('active-amber', !!state.magnet);
+        }
+        if (railBtns.DELETE_SEL) {
+          railBtns.DELETE_SEL.classList.toggle('active-red', !!selectedOverlayId);
+          railBtns.DELETE_SEL.classList.toggle('dimmed', !selectedOverlayId);
+        }
+        const count = overlayHistory.length;
+        if (railBtns.UNDO) {
+          railBtns.UNDO.classList.toggle('active-amber', count > 0);
+          railBtns.UNDO.classList.toggle('dimmed', count === 0);
+        }
+        if (railBtns.CLEAR) {
+          railBtns.CLEAR.classList.toggle('active-red', count > 0);
+          railBtns.CLEAR.classList.toggle('dimmed', count === 0);
+        }
+        if (drawBadge) {
+          drawBadge.textContent = String(count);
+          drawBadge.style.display = count > 0 ? 'flex' : 'none';
+        }
+        hintPill.textContent = TOOL_HINTS[activeDrawTool] || TOOL_HINTS.POINTER;
+      }
+
+      function cancelPendingOverlay() {
+        if (activePendingOverlayId) {
+          const pendingId = activePendingOverlayId;
+          activePendingOverlayId = null;
+          try { chart.removeOverlay(pendingId); } catch (e) {}
+          overlayHistory = overlayHistory.filter((id) => id !== pendingId);
+        }
+      }
+
+      function startDrawingTool(toolName) {
+        if (toolName === 'POINTER') {
+          cancelPendingOverlay();
+          activeDrawTool = 'POINTER';
+          updateToolbarUI();
+          return;
+        }
+        if (activeDrawTool === toolName && activePendingOverlayId) {
+          cancelPendingOverlay();
+          activeDrawTool = 'POINTER';
+          updateToolbarUI();
+          return;
+        }
+        cancelPendingOverlay();
+        activeDrawTool = toolName;
+        selectedOverlayId = null;
+
+        const created = chart.createOverlay({
+          name: toolName,
+          groupId: 'user_drawings',
+          mode: state.magnet ? 'weak_magnet' : 'normal',
+          onDrawEnd: (ev) => {
+            const doneId = ev && ev.overlay ? ev.overlay.id : null;
+            if (doneId && overlayHistory.indexOf(doneId) === -1) {
+              overlayHistory.push(doneId);
+            }
+            activePendingOverlayId = null;
+            activeDrawTool = 'POINTER';
+            updateToolbarUI();
+            return false;
+          },
+          onSelected: (ev) => {
+            selectedOverlayId = ev && ev.overlay ? ev.overlay.id : null;
+            updateToolbarUI();
+            return false;
+          },
+          onDeselected: () => {
+            selectedOverlayId = null;
+            updateToolbarUI();
+            return false;
+          },
+          onRemoved: (ev) => {
+            const rid = ev && ev.overlay ? ev.overlay.id : null;
+            if (rid) {
+              overlayHistory = overlayHistory.filter((id) => id !== rid);
+              if (selectedOverlayId === rid) selectedOverlayId = null;
+              if (activePendingOverlayId === rid) activePendingOverlayId = null;
+              updateToolbarUI();
+            }
+            return false;
+          },
+        }, 'candle_pane');
+
+        const createdId = Array.isArray(created) ? created[0] : created;
+        if (createdId) {
+          activePendingOverlayId = createdId;
+          overlayHistory.push(createdId);
+        }
+        updateToolbarUI();
+      }
+
+      // Wire left vertical rail buttons
+      railBtns.POINTER.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('POINTER'); });
+      railBtns.segment.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('segment'); });
+      railBtns.rayLine.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('rayLine'); });
+      railBtns.horizontalStraightLine.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('horizontalStraightLine'); });
+      railBtns.parallelStraightLine.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('parallelStraightLine'); });
+      railBtns.fibonacciLine.addEventListener('click', (e) => { e.stopPropagation(); startDrawingTool('fibonacciLine'); });
+
+      railBtns.TPSL.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.showTpSlBox = !state.showTpSlBox;
+        sendToHost({ type: 'TPSL_TOGGLED', show: state.showTpSlBox });
+        updateToolbarUI();
+        drawOverlay();
+      });
+
+      railBtns.MAGNET.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.magnet = !state.magnet;
+        updateToolbarUI();
+        hintPill.textContent = state.magnet
+          ? '🧲 Magnet Snap ON — drawings snap to candle OHLC'
+          : '🧲 Magnet Snap OFF — freehand placement';
+      });
+
+      railBtns.DELETE_SEL.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!selectedOverlayId) return;
+        const targetId = selectedOverlayId;
+        selectedOverlayId = null;
+        try { chart.removeOverlay(targetId); } catch (err) {}
+        overlayHistory = overlayHistory.filter((id) => id !== targetId);
+        updateToolbarUI();
+      });
+
+      function undoLastDrawing() {
+        if (activePendingOverlayId) {
+          cancelPendingOverlay();
+          activeDrawTool = 'POINTER';
+          updateToolbarUI();
+          return;
+        }
+        if (overlayHistory.length > 0) {
+          const lastId = overlayHistory.pop();
+          if (selectedOverlayId === lastId) selectedOverlayId = null;
+          try { chart.removeOverlay(lastId); } catch (err) {}
+          updateToolbarUI();
+        }
+      }
+
+      function clearAllDrawings() {
+        activePendingOverlayId = null;
+        selectedOverlayId = null;
+        overlayHistory = [];
+        activeDrawTool = 'POINTER';
+        try { chart.removeOverlay(); } catch (err) {}
+        updateToolbarUI();
+      }
+
+      railBtns.UNDO.addEventListener('click', (e) => {
+        e.stopPropagation();
+        undoLastDrawing();
+      });
+
+      railBtns.CLEAR.addEventListener('click', (e) => {
+        e.stopPropagation();
+        clearAllDrawings();
+      });
+
+      // Desktop keyboard shortcut: Delete / Backspace deletes selected drawing, Esc returns to Pointer
+      window.addEventListener('keydown', (e) => {
+        if ((e.key === 'Delete' || e.key === 'Backspace') && selectedOverlayId) {
+          const targetId = selectedOverlayId;
+          selectedOverlayId = null;
+          try { chart.removeOverlay(targetId); } catch (err) {}
+          overlayHistory = overlayHistory.filter((id) => id !== targetId);
+          updateToolbarUI();
+        } else if (e.key === 'Escape') {
+          startDrawingTool('POINTER');
+        }
+      });
+
+      // Helper utilities for coordinate conversion & pill rendering
       function roundTick(p) {
         return Math.max(0.05, Math.round(p * 20) / 20);
       }
 
-      function getPlotWidth() {
-        const W = container.clientWidth;
-        let rightAxisW = 68;
+      function getCandleBounds() {
+        const W = chartArea.clientWidth;
+        const H = chartArea.clientHeight;
+        let plotW = Math.max(100, W - 62);
+        let plotH = Math.max(100, H - 26);
         try {
-          const psW = chart.priceScale('right').width();
-          if (typeof psW === 'number' && psW > 30) {
-            rightAxisW = Math.ceil(psW) + 4;
+          const mainSize = chart.getSize('candle_pane', 'main');
+          if (mainSize && mainSize.width > 40 && mainSize.height > 40) {
+            plotW = mainSize.width;
+            plotH = mainSize.height;
           }
         } catch (e) {}
-        return Math.max(100, W - rightAxisW);
+        return { W, H, plotW, plotH };
       }
 
-      function resizeCanvas() {
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width = container.clientWidth * dpr;
-        canvas.height = container.clientHeight * dpr;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        drawOverlay();
+      function priceToY(price) {
+        if (typeof price !== 'number' || !isFinite(price) || price <= 0) return null;
+        try {
+          const res = chart.convertToPixel({ value: price }, { paneId: 'candle_pane', absolute: false });
+          const pt = Array.isArray(res) ? res[0] : res;
+          if (pt && typeof pt.y === 'number' && isFinite(pt.y)) return pt.y;
+        } catch (e) {}
+        return null;
+      }
+
+      function yToPrice(y) {
+        try {
+          const res = chart.convertFromPixel([{ y }], { paneId: 'candle_pane', absolute: false });
+          const pt = Array.isArray(res) ? res[0] : res;
+          if (pt && typeof pt.value === 'number' && !isNaN(pt.value) && pt.value > 0) return pt.value;
+        } catch (e) {}
+        return null;
       }
 
       function drawRoundedRect(x, y, w, h, r) {
@@ -421,11 +1063,12 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         }
       }
 
-      function drawPill(x, y, text, bgColor, textColor = '#FFFFFF', borderColor = null, options = {}) {
-        const isCompact = !!options.compact;
-        const align = options.align || 'left';
-        const minX = typeof options.minX === 'number' ? options.minX : 6;
-        const maxX = typeof options.maxX === 'number' ? options.maxX : Math.max(80, getPlotWidth() - 6);
+      function drawPill(x, y, text, bgColor, textColor, borderColor, options) {
+        const opts = options || {};
+        const isCompact = !!opts.compact;
+        const align = opts.align || 'left';
+        const minX = typeof opts.minX === 'number' ? opts.minX : 6;
+        const maxX = typeof opts.maxX === 'number' ? opts.maxX : Math.max(80, getCandleBounds().plotW - 6);
 
         ctx.font = (isCompact ? 'bold 9.5px ' : 'bold 10px ') + '-apple-system, BlinkMacSystemFont, sans-serif';
         const padX = isCompact ? 5 : 7;
@@ -458,127 +1101,90 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.stroke();
         }
 
-        ctx.fillStyle = textColor;
+        ctx.fillStyle = textColor || '#FFFFFF';
         ctx.textBaseline = 'middle';
         ctx.fillText(displayText, drawX + padX, y + 0.5);
         return { x: drawX, y: top, w, h };
       }
 
-      function drawOverlay() {
-        const W = container.clientWidth;
-        const H = container.clientHeight;
-        const plotW = getPlotWidth();
-        const isCompact = W <= 420;
-        const pillRightEdge = plotW - 6;
-        ctx.clearRect(0, 0, W, H);
+      // Track last rendered pill hitboxes for crisp touch/mouse grabbing
+      let renderedPills = {}; // { TP?: rect, ENTRY?: rect, SL?: rect }
+      let draggingTarget = null; // { type: 'ENTRY' | 'SL' | 'TP' }
 
-        const yEntry = state.entry > 0 ? candleSeries.priceToCoordinate(state.entry) : null;
-        const ySL = state.sl > 0 ? candleSeries.priceToCoordinate(state.sl) : null;
-        const yTP = state.tp > 0 ? candleSeries.priceToCoordinate(state.tp) : null;
+      function resizeCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = chartArea.clientWidth * dpr;
+        canvas.height = chartArea.clientHeight * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawOverlay();
+      }
+
+      function drawOverlay() {
+        const { W, H, plotW, plotH } = getCandleBounds();
+        const isCompact = W <= 390;
+        const pillRightEdge = plotW - 6;
+        const baseAlpha = Math.max(0.15, Math.min(1.0, state.overlayOpacity || 1.0));
+
+        ctx.clearRect(0, 0, W, H);
+        renderedPills = {};
+
+        // Clip overlay cleanly to the main candle_pane so lines never bleed into VOL/RSI sub-panes
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, plotW, plotH);
+        ctx.clip();
+
+        const isMarket = state.orderType === 'MARKET';
+        const anchorPrice = getEffectiveEntryPrice();
+        const yAnchor = priceToY(anchorPrice);
+        const yEntry = isMarket ? null : priceToY(state.entry);
+        const ySL = priceToY(state.sl);
+        const yTP = priceToY(state.tp);
 
         const isBuy = state.side === 'BUY';
-        const slInverted = state.sl > 0 && state.entry > 0 && (isBuy ? state.sl >= state.entry : state.sl <= state.entry);
-        const tpInverted = state.tp > 0 && state.entry > 0 && (isBuy ? state.tp <= state.entry : state.tp >= state.entry);
+        const slInverted = state.sl > 0 && anchorPrice > 0 && (isBuy ? state.sl >= anchorPrice : state.sl <= anchorPrice);
+        const tpInverted = state.tp > 0 && anchorPrice > 0 && (isBuy ? state.tp <= anchorPrice : state.tp >= anchorPrice);
 
-        // 1. TradingView Long / Short Risk-Reward Shaded Box (TP/SL Tool)
-        if (state.showTpSlBox && yEntry !== null) {
+        // 1. Shaded Long / Short Risk-Reward Zone (anchored to live LTP in MKT mode, or Entry in LIMIT mode)
+        if (state.showTpSlBox && yAnchor !== null) {
           const boxLeft = Math.max(10, Math.round(plotW * (isCompact ? 0.14 : 0.24)));
           const boxWidth = Math.max(60, Math.min(plotW - boxLeft - 6, Math.round(plotW * 0.72)));
+          const clampedAnchorY = Math.max(0, Math.min(plotH, yAnchor));
 
-          // Profit Zone (Entry -> TP)
+          ctx.save();
+          ctx.globalAlpha = baseAlpha;
           if (yTP !== null) {
-            const topY = Math.min(yEntry, yTP);
-            const boxH = Math.abs(yTP - yEntry);
-            ctx.fillStyle = tpInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(16, 185, 129, 0.14)';
-            ctx.fillRect(boxLeft, topY, boxWidth, boxH);
-            ctx.strokeStyle = tpInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(16, 185, 129, 0.45)';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
+            const clampedTpY = Math.max(0, Math.min(plotH, yTP));
+            const topY = Math.min(clampedAnchorY, clampedTpY);
+            const boxH = Math.abs(clampedTpY - clampedAnchorY);
+            if (boxH > 0) {
+              ctx.fillStyle = tpInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(16, 185, 129, 0.15)';
+              ctx.fillRect(boxLeft, topY, boxWidth, boxH);
+              ctx.strokeStyle = tpInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(16, 185, 129, 0.45)';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
+            }
           }
 
-          // Risk Zone (Entry -> SL)
           if (ySL !== null) {
-            const topY = Math.min(yEntry, ySL);
-            const boxH = Math.abs(ySL - yEntry);
-            ctx.fillStyle = slInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(239, 68, 68, 0.15)';
-            ctx.fillRect(boxLeft, topY, boxWidth, boxH);
-            ctx.strokeStyle = slInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(239, 68, 68, 0.45)';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
+            const clampedSlY = Math.max(0, Math.min(plotH, ySL));
+            const topY = Math.min(clampedAnchorY, clampedSlY);
+            const boxH = Math.abs(clampedSlY - clampedAnchorY);
+            if (boxH > 0) {
+              ctx.fillStyle = slInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(239, 68, 68, 0.16)';
+              ctx.fillRect(boxLeft, topY, boxWidth, boxH);
+              ctx.strokeStyle = slInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(239, 68, 68, 0.45)';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
+            }
           }
+          ctx.restore();
         }
 
-        // 2. Custom Horizontal Support/Resistance Lines
-        state.hLines.forEach((hl) => {
-          const y = candleSeries.priceToCoordinate(hl.price);
-          if (y === null) return;
-          ctx.save();
-          ctx.strokeStyle = '#FACC15';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([6, 4]);
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(plotW, y);
-          ctx.stroke();
-          ctx.restore();
-          drawPill(6, y, '━ SR ₹' + hl.price.toFixed(1), 'rgba(250, 204, 21, 0.9)', '#0F172A', null, {
-            compact: isCompact,
-            align: 'left',
-            minX: 6,
-            maxX: pillRightEdge,
-          });
-        });
-
-        // 3. Custom Diagonal Trendlines
-        state.trendLines.forEach((tl) => {
-          const x1 = chart.timeScale().timeToCoordinate(tl.p1.time);
-          const y1 = candleSeries.priceToCoordinate(tl.p1.price);
-          const x2 = chart.timeScale().timeToCoordinate(tl.p2.time);
-          const y2 = candleSeries.priceToCoordinate(tl.p2.price);
-          if (x1 === null || y1 === null || x2 === null || y2 === null) return;
-
-          ctx.save();
-          ctx.strokeStyle = '#C084FC';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
-          ctx.stroke();
-
-          // Anchor dots
-          ctx.fillStyle = '#E879F9';
-          ctx.beginPath();
-          ctx.arc(x1, y1, 4, 0, Math.PI * 2);
-          ctx.arc(x2, y2, 4, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        });
-
-        // Pending trendline preview
-        if (state.tool === 'TRENDLINE' && state.pendingTrendStart) {
-          const x1 = chart.timeScale().timeToCoordinate(state.pendingTrendStart.time);
-          const y1 = candleSeries.priceToCoordinate(state.pendingTrendStart.price);
-          if (x1 !== null && y1 !== null) {
-            ctx.save();
-            ctx.strokeStyle = 'rgba(192, 132, 252, 0.75)';
-            ctx.setLineDash([4, 4]);
-            ctx.lineWidth = 1.5;
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(pointerPos.x, pointerPos.y);
-            ctx.stroke();
-            ctx.fillStyle = '#E879F9';
-            ctx.beginPath();
-            ctx.arc(x1, y1, 4.5, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-          }
-        }
-
-        // 4. Active Open Position Line on Chart
+        // 2. Active Open Position Line on Chart
         if (state.activePosition && state.activePosition.avgPrice > 0) {
-          const yPos = candleSeries.priceToCoordinate(state.activePosition.avgPrice);
-          if (yPos !== null) {
+          const yPos = priceToY(state.activePosition.avgPrice);
+          if (yPos !== null && yPos >= 4 && yPos <= plotH - 4) {
             ctx.save();
             ctx.strokeStyle = '#F59E0B';
             ctx.lineWidth = 2;
@@ -587,6 +1193,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             ctx.lineTo(plotW, yPos);
             ctx.stroke();
             ctx.restore();
+
             const sideLbl = state.activePosition.netQty > 0 ? 'LONG' : 'SHORT';
             const pnlStr = (state.activePosition.pnl >= 0 ? '+₹' : '-₹') + Math.abs(Math.round(state.activePosition.pnl));
             drawPill(
@@ -595,20 +1202,15 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               '⚡ ' + sideLbl + ' ' + Math.abs(state.activePosition.netQty) + ' @ ₹' + state.activePosition.avgPrice.toFixed(1) + ' (' + pnlStr + ')',
               '#F59E0B',
               '#0F172A',
-              null,
-              {
-                compact: isCompact,
-                align: 'left',
-                minX: 6,
-                maxX: pillRightEdge,
-              }
+              '#FEF08A',
+              { compact: isCompact, align: 'left', minX: 6, maxX: pillRightEdge }
             );
           }
         }
 
-        // 5. Draggable TP, ENTRY, SL Lines & Interactive Handles (draw dragged handle last for top z-order)
-        const slPts = state.sl > 0 && !slInverted ? Math.abs(state.entry - state.sl) : 0;
-        const tpPts = state.tp > 0 && !tpInverted ? Math.abs(state.tp - state.entry) : 0;
+        // 3. Draggable TP, ENTRY (hidden in MARKET mode), SL Lines & Interactive Handles
+        const slPts = state.sl > 0 && !slInverted ? Math.abs(anchorPrice - state.sl) : 0;
+        const tpPts = state.tp > 0 && !tpInverted ? Math.abs(state.tp - anchorPrice) : 0;
         const riskRs = Math.round(slPts * state.totalQty);
         const rewardRs = Math.round(tpPts * state.totalQty);
         const rrStr = slPts > 0 && tpPts > 0 ? (tpPts / slPts).toFixed(2) : '-';
@@ -621,28 +1223,30 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         };
 
         const renderTP = () => {
-          if (yTP === null) return;
+          if (yTP === null || yTP < 2 || yTP > plotH - 2) return;
+          const isDragging = draggingTarget && draggingTarget.type === 'TP';
           ctx.save();
+          ctx.globalAlpha = isDragging ? Math.max(0.9, baseAlpha) : baseAlpha;
           ctx.strokeStyle = tpInverted ? '#F59E0B' : '#10B981';
-          ctx.lineWidth = draggingTarget && draggingTarget.type === 'TP' ? 3 : 2;
+          ctx.lineWidth = isDragging ? 3 : 2;
           ctx.setLineDash([5, 3]);
           ctx.beginPath();
           ctx.moveTo(0, yTP);
           ctx.lineTo(plotW, yTP);
           ctx.stroke();
-          ctx.restore();
+          ctx.setLineDash([]);
 
           let tpLabel;
           if (tpInverted) {
-            const cmp = isBuy ? (state.tp < state.entry ? '<' : '=') : (state.tp > state.entry ? '>' : '=');
-            tpLabel = '☰ ⚠️ TP ' + cmp + ' ENTRY ₹' + state.tp.toFixed(1);
+            const cmp = isBuy ? (state.tp < anchorPrice ? '<' : '=') : (state.tp > anchorPrice ? '>' : '=');
+            tpLabel = '☰ ⚠️ TP ' + cmp + (isMarket ? ' LTP ₹' : ' ENTRY ₹') + state.tp.toFixed(1);
           } else if (isCompact) {
             tpLabel = '☰ TP ₹' + state.tp.toFixed(1) + ' +₹' + rewardRs + (rrStr !== '-' ? ' (1:' + rrStr + ')' : '');
           } else {
             tpLabel = '☰ TP ₹' + state.tp.toFixed(1) + '  +₹' + rewardRs + ' (1:' + rrStr + ')';
           }
 
-          drawPill(
+          renderedPills.TP = drawPill(
             pillRightEdge,
             yTP,
             tpLabel,
@@ -651,44 +1255,57 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             tpInverted ? '#FEF08A' : '#6EE7B7',
             pillOpts
           );
+          ctx.restore();
         };
 
         const renderEntry = () => {
-          if (yEntry === null) return;
+          if (isMarket || yEntry === null || yEntry < 2 || yEntry > plotH - 2) return;
+          const isDragging = draggingTarget && draggingTarget.type === 'ENTRY';
           ctx.save();
+          ctx.globalAlpha = isDragging ? Math.max(0.9, baseAlpha) : baseAlpha;
           ctx.strokeStyle = '#38BDF8';
-          ctx.lineWidth = draggingTarget && draggingTarget.type === 'ENTRY' ? 3 : 2;
+          ctx.lineWidth = isDragging ? 3 : 2;
           ctx.beginPath();
           ctx.moveTo(0, yEntry);
           ctx.lineTo(plotW, yEntry);
           ctx.stroke();
-          ctx.restore();
 
           const entryLabel = '☰ ' + state.side + ' ENTRY ₹' + state.entry.toFixed(1);
-          drawPill(pillRightEdge, yEntry, entryLabel, '#0284C7', '#FFFFFF', '#7DD3FC', pillOpts);
+          renderedPills.ENTRY = drawPill(
+            pillRightEdge,
+            yEntry,
+            entryLabel,
+            '#0284C7',
+            '#FFFFFF',
+            '#7DD3FC',
+            pillOpts
+          );
+          ctx.restore();
         };
 
         const renderSL = () => {
-          if (ySL === null) return;
+          if (ySL === null || ySL < 2 || ySL > plotH - 2) return;
+          const isDragging = draggingTarget && draggingTarget.type === 'SL';
           ctx.save();
+          ctx.globalAlpha = isDragging ? Math.max(0.9, baseAlpha) : baseAlpha;
           ctx.strokeStyle = slInverted ? '#F59E0B' : '#EF4444';
-          ctx.lineWidth = draggingTarget && draggingTarget.type === 'SL' ? 3 : 2;
+          ctx.lineWidth = isDragging ? 3 : 2;
           ctx.setLineDash([5, 3]);
           ctx.beginPath();
           ctx.moveTo(0, ySL);
           ctx.lineTo(plotW, ySL);
           ctx.stroke();
-          ctx.restore();
+          ctx.setLineDash([]);
 
           let slLabel;
           if (slInverted) {
-            const cmp = isBuy ? (state.sl > state.entry ? '>' : '=') : (state.sl < state.entry ? '<' : '=');
-            slLabel = '☰ ⚠️ SL ' + cmp + ' ENTRY ₹' + state.sl.toFixed(1);
+            const cmp = isBuy ? (state.sl > anchorPrice ? '>' : '=') : (state.sl < anchorPrice ? '<' : '=');
+            slLabel = '☰ ⚠️ SL ' + cmp + (isMarket ? ' LTP ₹' : ' ENTRY ₹') + state.sl.toFixed(1);
           } else {
             slLabel = '☰ SL ₹' + state.sl.toFixed(1) + (isCompact ? ' -₹' : '  -₹') + riskRs;
           }
 
-          drawPill(
+          renderedPills.SL = drawPill(
             pillRightEdge,
             ySL,
             slLabel,
@@ -697,10 +1314,11 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             slInverted ? '#FEF08A' : '#FCA5A5',
             pillOpts
           );
+          ctx.restore();
         };
 
         const activeDragType = draggingTarget ? draggingTarget.type : null;
-        const drawOrder = ['TP', 'ENTRY', 'SL'];
+        const drawOrder = isMarket ? ['TP', 'SL'] : ['TP', 'ENTRY', 'SL'];
         if (activeDragType && drawOrder.indexOf(activeDragType) !== -1) {
           drawOrder.splice(drawOrder.indexOf(activeDragType), 1);
           drawOrder.push(activeDragType);
@@ -710,141 +1328,110 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           else if (key === 'ENTRY') renderEntry();
           else if (key === 'SL') renderSL();
         });
+
+        ctx.restore();
       }
 
-      // Hit-test near a horizontal level (16px tolerance for comfortable finger/mouse grabbing)
-      function hitTestLine(yClick) {
-        const TOL = 16;
+      // Hit-test draggable TP/ENTRY/SL pill handles (priority) or lines (excludes ENTRY in MARKET mode)
+      function hitTestOrderHandle(xClick, yClick) {
+        const { plotW, plotH } = getCandleBounds();
+        if (xClick > plotW || yClick < 0 || yClick > plotH) return null;
+
+        const isMarket = state.orderType === 'MARKET';
+
+        // 1. Check direct hit on pill handles (generous 6px touch pad)
+        const PAD = 6;
+        const keys = isMarket ? ['TP', 'SL'] : ['TP', 'SL', 'ENTRY'];
+        for (let i = 0; i < keys.length; i++) {
+          const k = keys[i];
+          const rect = renderedPills[k];
+          if (
+            rect &&
+            xClick >= rect.x - PAD &&
+            xClick <= rect.x + rect.w + PAD &&
+            yClick >= rect.y - PAD &&
+            yClick <= rect.y + rect.h + PAD
+          ) {
+            return { type: k };
+          }
+        }
+
+        // 2. Check proximity to horizontal lines when no overlay is actively selected
+        if (selectedOverlayId) return null;
+        const TOL = 14;
         const candidates = [];
-        if (state.tp > 0) {
-          const y = candleSeries.priceToCoordinate(state.tp);
-          if (y !== null && Math.abs(y - yClick) <= TOL) candidates.push({ type: 'TP', dist: Math.abs(y - yClick) });
+        const yTP = priceToY(state.tp);
+        const ySL = priceToY(state.sl);
+        const yEntry = isMarket ? null : priceToY(state.entry);
+        if (yTP !== null && yTP >= 2 && yTP <= plotH - 2 && Math.abs(yTP - yClick) <= TOL) {
+          candidates.push({ type: 'TP', dist: Math.abs(yTP - yClick) });
         }
-        if (state.sl > 0) {
-          const y = candleSeries.priceToCoordinate(state.sl);
-          if (y !== null && Math.abs(y - yClick) <= TOL) candidates.push({ type: 'SL', dist: Math.abs(y - yClick) });
+        if (ySL !== null && ySL >= 2 && ySL <= plotH - 2 && Math.abs(ySL - yClick) <= TOL) {
+          candidates.push({ type: 'SL', dist: Math.abs(ySL - yClick) });
         }
-        if (state.entry > 0) {
-          const y = candleSeries.priceToCoordinate(state.entry);
-          if (y !== null && Math.abs(y - yClick) <= TOL) candidates.push({ type: 'ENTRY', dist: Math.abs(y - yClick) });
+        if (!isMarket && yEntry !== null && yEntry >= 2 && yEntry <= plotH - 2 && Math.abs(yEntry - yClick) <= TOL) {
+          candidates.push({ type: 'ENTRY', dist: Math.abs(yEntry - yClick) });
         }
-        state.hLines.forEach((hl, idx) => {
-          const y = candleSeries.priceToCoordinate(hl.price);
-          if (y !== null && Math.abs(y - yClick) <= TOL) candidates.push({ type: 'HLINE', index: idx, dist: Math.abs(y - yClick) });
-        });
 
         candidates.sort((a, b) => a.dist - b.dist);
-        return candidates.length > 0 ? candidates[0] : null;
+        return candidates.length > 0 ? { type: candidates[0].type } : null;
       }
 
       function getCoords(e) {
-        const rect = container.getBoundingClientRect();
+        const rect = chartArea.getBoundingClientRect();
         const clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
         const clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
         return { x: clientX - rect.left, y: clientY - rect.top };
       }
 
       function onPointerDown(e) {
-        // Ignore clicks on quick order buttons
-        if (e.target && e.target.closest && e.target.closest('.quick-order-bar')) return;
+        if (
+          e.target &&
+          e.target.closest &&
+          (e.target.closest('.quick-order-bar') || e.target.closest('.floating-reset-btn'))
+        ) {
+          return;
+        }
+        // Let KLineChart handle 100% of clicks while actively placing a drawing tool
+        if (activeDrawTool !== 'POINTER') return;
 
         const pos = getCoords(e);
-        pointerPos = pos;
-
-        // Allow native price-axis vertical scaling on the right axis without grabbing lines
-        if (pos.x > getPlotWidth()) return;
-
-        // Drawing mode: HLINE
-        if (state.tool === 'HLINE') {
-          const price = candleSeries.coordinateToPrice(pos.y);
-          if (price) {
-            state.hLines.push({ id: Date.now(), price: roundTick(price) });
-            state.drawingHistory.push('HLINE');
-            sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
-            drawOverlay();
-          }
-          return;
-        }
-
-        // Drawing mode: TRENDLINE (2 taps)
-        if (state.tool === 'TRENDLINE') {
-          const price = candleSeries.coordinateToPrice(pos.y);
-          let time = chart.timeScale().coordinateToTime(pos.x);
-          if (!time && rawCandles.length > 0) time = rawCandles[rawCandles.length - 1].time;
-          if (price && time) {
-            if (!state.pendingTrendStart) {
-              state.pendingTrendStart = { time, price: roundTick(price) };
-              hintPill.textContent = '╱ Tap second point to complete Trendline';
-            } else {
-              state.trendLines.push({
-                id: Date.now(),
-                p1: state.pendingTrendStart,
-                p2: { time, price: roundTick(price) },
-              });
-              state.drawingHistory.push('TRENDLINE');
-              state.pendingTrendStart = null;
-              hintPill.textContent = '╱ Trendline added! Tap again to draw another';
-              sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
-            }
-            drawOverlay();
-          }
-          return;
-        }
-
-        // Hit-test draggable Entry / SL / TP / H-Line handles
-        const hit = hitTestLine(pos.y);
+        const hit = hitTestOrderHandle(pos.x, pos.y);
         if (hit) {
           draggingTarget = hit;
-          chart.applyOptions({ handleScroll: false, handleScale: false });
+          try {
+            chart.setScrollEnabled(false);
+            chart.setZoomEnabled(false);
+          } catch (err) {}
           if (e.cancelable) e.preventDefault();
+          e.stopPropagation();
           drawOverlay();
-          return;
-        }
-
-        // In TPSL tap-to-anchor mode, tapping empty area sets active level
-        if (state.tool === 'TPSL') {
-          const price = candleSeries.coordinateToPrice(pos.y);
-          if (price) {
-            const snapped = roundTick(price);
-            if (state.activeLineType === 'ENTRY') state.entry = snapped;
-            else if (state.activeLineType === 'SL') state.sl = snapped;
-            else if (state.activeLineType === 'TP') state.tp = snapped;
-            sendToHost({ type: 'LEVEL_DRAGGED', line: state.activeLineType, price: snapped });
-            drawOverlay();
-          }
         }
       }
 
       function onPointerMove(e) {
         const pos = getCoords(e);
-        pointerPos = pos;
-
         if (!draggingTarget) {
-          // Hover cursor feedback on desktop
-          if (pos.x > getPlotWidth()) {
-            container.style.cursor = 'ns-resize';
-            return;
-          }
-          const hit = hitTestLine(pos.y);
-          container.style.cursor = hit ? 'ns-resize' : (state.tool === 'HLINE' || state.tool === 'TRENDLINE' ? 'crosshair' : 'default');
-          if (state.tool === 'TRENDLINE' && state.pendingTrendStart) {
-            drawOverlay();
+          if (activeDrawTool === 'POINTER') {
+            const hit = hitTestOrderHandle(pos.x, pos.y);
+            klineContainer.style.cursor = hit ? 'ns-resize' : 'crosshair';
+          } else {
+            klineContainer.style.cursor = 'crosshair';
           }
           return;
         }
 
         if (e.cancelable) e.preventDefault();
-        const price = candleSeries.coordinateToPrice(pos.y);
+        e.stopPropagation();
+        const price = yToPrice(pos.y);
         if (!price) return;
         const snapped = roundTick(price);
 
         if (draggingTarget.type === 'ENTRY') state.entry = snapped;
         else if (draggingTarget.type === 'SL') state.sl = snapped;
         else if (draggingTarget.type === 'TP') state.tp = snapped;
-        else if (draggingTarget.type === 'HLINE' && state.hLines[draggingTarget.index]) {
-          state.hLines[draggingTarget.index].price = snapped;
-        }
 
+        updateQuickOrderButtons();
         drawOverlay();
       }
 
@@ -852,7 +1439,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         if (!draggingTarget) return;
         const finished = draggingTarget;
         draggingTarget = null;
-        chart.applyOptions({ handleScroll: true, handleScale: true });
+        try {
+          chart.setScrollEnabled(true);
+          chart.setZoomEnabled(true);
+        } catch (err) {}
 
         if (finished.type === 'ENTRY') sendToHost({ type: 'LEVEL_DRAGGED', line: 'ENTRY', price: state.entry });
         else if (finished.type === 'SL') sendToHost({ type: 'LEVEL_DRAGGED', line: 'SL', price: state.sl });
@@ -861,35 +1451,142 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         drawOverlay();
       }
 
-      // Attach Mouse & Touch listeners in capture phase so grabbing handles beats chart pan
-      wrapper.addEventListener('mousedown', onPointerDown, true);
+      // Capture phase on chartArea so dragging order handles smoothly beats chart pan
+      chartArea.addEventListener('mousedown', onPointerDown, true);
       window.addEventListener('mousemove', onPointerMove, true);
       window.addEventListener('mouseup', onPointerUp, true);
 
-      wrapper.addEventListener('touchstart', onPointerDown, { passive: false, capture: true });
+      chartArea.addEventListener('touchstart', onPointerDown, { passive: false, capture: true });
       window.addEventListener('touchmove', onPointerMove, { passive: false, capture: true });
       window.addEventListener('touchend', onPointerUp, true);
 
       // Quick Buy / Sell / Exit buttons directly on chart
       btnQuickBuy.addEventListener('click', (e) => {
         e.stopPropagation();
-        sendToHost({ type: 'QUICK_ORDER', side: 'BUY', price: state.entry });
+        sendToHost({ type: 'QUICK_ORDER', side: 'BUY', price: getEffectiveEntryPrice() });
       });
       btnQuickSell.addEventListener('click', (e) => {
         e.stopPropagation();
-        sendToHost({ type: 'QUICK_ORDER', side: 'SELL', price: state.entry });
+        sendToHost({ type: 'QUICK_ORDER', side: 'SELL', price: getEffectiveEntryPrice() });
       });
       btnQuickExit.addEventListener('click', (e) => {
         e.stopPropagation();
         sendToHost({ type: 'QUICK_EXIT' });
       });
 
-      // Redraw overlay smoothly when chart zooms/pans
-      chart.timeScale().subscribeVisibleTimeRangeChange(() => drawOverlay());
-      chart.timeScale().subscribeVisibleLogicalRangeChange(() => drawOverlay());
-      setInterval(() => drawOverlay(), 250);
+      // Keep overlay canvas synced smoothly when KLineChart scrolls, zooms, or resizes panes
+      try {
+        chart.subscribeAction('onScroll', () => drawOverlay());
+        chart.subscribeAction('onZoom', () => drawOverlay());
+        chart.subscribeAction('onVisibleRangeChange', () => drawOverlay());
+        chart.subscribeAction('onPaneDrag', () => drawOverlay());
+      } catch (e) {}
+      setInterval(() => drawOverlay(), 200);
 
-      // Receive state updates from React Native host without reloading
+      function getTimeframeMs(tf) {
+        const map = {
+          '1m': 60 * 1000,
+          '3m': 3 * 60 * 1000,
+          '5m': 5 * 60 * 1000,
+          '15m': 15 * 60 * 1000,
+          '30m': 30 * 60 * 1000,
+          '1H': 60 * 60 * 1000,
+          '4H': 4 * 60 * 60 * 1000,
+          '1D': 24 * 60 * 60 * 1000,
+          '1W': 7 * 24 * 60 * 60 * 1000,
+        };
+        return map[tf] || 5 * 60 * 1000;
+      }
+
+      let ltpFlashTimer = null;
+      function applyLiveTick(price, volume, timestamp) {
+        if (typeof price !== 'number' || !isFinite(price) || price <= 0) return;
+
+        const prevLtp = state.lastLtp;
+        state.lastLtp = price;
+        state.livePrice = price;
+        if (state.orderType === 'MARKET') {
+          updateQuickOrderButtons();
+        }
+        ltpHeader.textContent = '₹' + price.toFixed(2);
+        ltpHeader.classList.remove('ltp-up', 'ltp-down');
+        if (price > prevLtp) ltpHeader.classList.add('ltp-up');
+        else if (price < prevLtp) ltpHeader.classList.add('ltp-down');
+        if (ltpFlashTimer) clearTimeout(ltpFlashTimer);
+        ltpFlashTimer = setTimeout(() => {
+          ltpHeader.classList.remove('ltp-up', 'ltp-down');
+        }, 500);
+
+        const tfMs = getTimeframeMs(state.timeframe);
+        const rawTs = typeof timestamp === 'number' && timestamp > 0 ? timestamp : Date.now();
+        const tsMs = rawTs < 1e12 ? rawTs * 1000 : rawTs;
+        const weekOffsetMs = 4 * 24 * 60 * 60 * 1000; // Align 1W bars to Monday
+        const bucketTs =
+          state.timeframe === '1W'
+            ? Math.floor((tsMs - weekOffsetMs) / tfMs) * tfMs + weekOffsetMs
+            : Math.floor(tsMs / tfMs) * tfMs;
+        const volAdd = typeof volume === 'number' && volume > 0 ? volume : 1;
+
+        const lastBar = klineBars.length > 0 ? klineBars[klineBars.length - 1] : null;
+        if (!lastBar) {
+          const firstBar = { timestamp: bucketTs, open: price, high: price, low: price, close: price, volume: volAdd };
+          klineBars.push(firstBar);
+          chart.applyNewData(klineBars);
+        } else if (bucketTs > lastBar.timestamp) {
+          const openPrice = lastBar.close;
+          const newBar = {
+            timestamp: bucketTs,
+            open: openPrice,
+            high: Math.max(openPrice, price),
+            low: Math.min(openPrice, price),
+            close: price,
+            volume: volAdd,
+          };
+          klineBars.push(newBar);
+          chart.updateData(newBar);
+        } else {
+          lastBar.close = price;
+          if (price > lastBar.high) lastBar.high = price;
+          if (price < lastBar.low) lastBar.low = price;
+          lastBar.volume = (lastBar.volume || 0) + volAdd;
+          chart.updateData({
+            timestamp: lastBar.timestamp,
+            open: lastBar.open,
+            high: lastBar.high,
+            low: lastBar.low,
+            close: lastBar.close,
+            volume: lastBar.volume,
+          });
+        }
+        drawOverlay();
+      }
+
+      function resetChartView() {
+        try {
+          chart.setBarSpace(9);
+          chart.setOffsetRightDistance(56);
+          chart.setPriceVolumePrecision(2, 0);
+          chart.setPaneOptions({
+            id: 'candle_pane',
+            gap: { top: 0.2, bottom: 0.1 },
+            axisOptions: { name: 'default', scrollZoomEnabled: true },
+          });
+          chart.scrollToRealTime(150);
+          chart.resize();
+        } catch (err) {}
+        hintPill.textContent = '⟲ Chart zoom & Y-axis reset to live candles';
+        drawOverlay();
+        setTimeout(() => drawOverlay(), 180);
+      }
+
+      if (btnResetChart) {
+        btnResetChart.addEventListener('click', (e) => {
+          e.stopPropagation();
+          resetChartView();
+        });
+      }
+
+      // Receive state & live tick updates from React Native host without reloading
       window.handleHostMessage = function(raw) {
         try {
           const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -898,97 +1595,85 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           if (data.type === 'SYNC_STATE') {
             if (!draggingTarget) {
               if (data.side) state.side = data.side;
+              if (data.orderType) state.orderType = data.orderType;
               if (typeof data.entry === 'number') state.entry = data.entry;
               if (typeof data.sl === 'number') state.sl = data.sl;
               if (typeof data.tp === 'number') state.tp = data.tp;
             }
             if (typeof data.totalQty === 'number') state.totalQty = data.totalQty;
             if (typeof data.showTpSlBox === 'boolean') state.showTpSlBox = data.showTpSlBox;
-            if (data.tool) {
-              state.tool = data.tool;
-              state.pendingTrendStart = null;
-              if (data.tool === 'DRAG') hintPill.textContent = '✋ Drag ENTRY / SL / TP handles directly on chart';
-              else if (data.tool === 'TPSL') hintPill.textContent = '📐 TP/SL Box active — drag handles or tap chart';
-              else if (data.tool === 'HLINE') hintPill.textContent = '━ Tap chart to place Support/Resistance line';
-              else if (data.tool === 'TRENDLINE') hintPill.textContent = '╱ Tap start point, then end point for Trendline';
-            }
+            if (typeof data.overlayOpacity === 'number') state.overlayOpacity = data.overlayOpacity;
+            if (typeof data.timeframe === 'string') state.timeframe = data.timeframe;
             if (data.activeLineType) state.activeLineType = data.activeLineType;
             state.activePosition = data.activePosition || null;
+
             btnQuickExit.style.display = state.activePosition ? 'inline-block' : 'none';
-            btnQuickBuy.textContent = 'BUY ₹' + state.entry.toFixed(1);
-            btnQuickSell.textContent = 'SELL ₹' + state.entry.toFixed(1);
+            updateQuickOrderButtons();
+
+            if (data.indicators) syncIndicators(data.indicators);
+            updateToolbarUI();
             drawOverlay();
+          } else if (data.type === 'LIVE_TICK') {
+            applyLiveTick(data.price, data.volume, data.timestamp);
+          } else if (data.type === 'RESET_CHART') {
+            resetChartView();
           } else if (data.type === 'UNDO_DRAWING') {
-            if (state.pendingTrendStart) {
-              state.pendingTrendStart = null;
-              hintPill.textContent = '╱ Tap start point, then end point for Trendline';
-            } else if (state.drawingHistory.length > 0) {
-              const lastType = state.drawingHistory.pop();
-              if (lastType === 'HLINE') {
-                state.hLines.pop();
-              } else if (lastType === 'TRENDLINE') {
-                state.trendLines.pop();
-              }
-            } else if (state.trendLines.length > 0) {
-              state.trendLines.pop();
-            } else if (state.hLines.length > 0) {
-              state.hLines.pop();
-            }
-            sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
-            drawOverlay();
+            undoLastDrawing();
           } else if (data.type === 'CLEAR_DRAWINGS') {
-            state.hLines = [];
-            state.trendLines = [];
-            state.drawingHistory = [];
-            state.pendingTrendStart = null;
-            sendToHost({ type: 'DRAWING_COUNT', count: 0 });
-            drawOverlay();
+            clearAllDrawings();
           }
-        } catch {}
+        } catch (err) {}
       };
 
       window.addEventListener('message', (e) => window.handleHostMessage(e.data));
 
       window.addEventListener('resize', () => {
-        chart.applyOptions({
-          width: container.clientWidth,
-          height: container.clientHeight,
-        });
+        try { chart.resize(); } catch (e) {}
         resizeCanvas();
       });
 
-      btnQuickBuy.textContent = 'BUY ₹' + state.entry.toFixed(1);
-      btnQuickSell.textContent = 'SELL ₹' + state.entry.toFixed(1);
+      updateQuickOrderButtons();
+      updateToolbarUI();
       resizeCanvas();
       sendToHost({ type: 'CHART_READY' });
     </script>
   </body>
 </html>`;
-  }, [candles, symbol, showVWAP, showEMA9]);
+  }, [candles, symbol]);
 
-  // Process incoming messages from chart (drags, quick buy/sell, exits, drawings)
-  const processChartEvent = useCallback((raw: any) => {
-    try {
-      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (!data || !data.type) return;
+  // Process incoming messages from chart (drags, quick buy/sell, exits, ready)
+  const processChartEvent = useCallback(
+    (raw: any) => {
+      try {
+        const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!data || !data.type) return;
 
-      if (data.type === 'CHART_READY') {
-        syncStateToChart();
-      } else if (data.type === 'LEVEL_DRAGGED') {
-        if (onLevelChange) {
-          onLevelChange(data.line, data.price);
-        } else if (onPriceSelected) {
-          onPriceSelected(data.price);
+        if (data.type === 'CHART_READY') {
+          syncStateToChart();
+        } else if (data.type === 'TPSL_TOGGLED' && typeof data.show === 'boolean') {
+          setShowTpSlBox(data.show);
+        } else if (data.type === 'LEVEL_DRAGGED') {
+          if (onLevelChange) {
+            onLevelChange(data.line, data.price);
+          } else if (onPriceSelected) {
+            onPriceSelected(data.price);
+          }
+        } else if (data.type === 'QUICK_ORDER' && onQuickOrder) {
+          onQuickOrder(data.side, data.price);
+        } else if (data.type === 'QUICK_EXIT' && activePosition && onQuickExitPosition) {
+          onQuickExitPosition(activePosition);
         }
-      } else if (data.type === 'QUICK_ORDER' && onQuickOrder) {
-        onQuickOrder(data.side, data.price);
-      } else if (data.type === 'QUICK_EXIT' && activePosition && onQuickExitPosition) {
-        onQuickExitPosition(activePosition);
-      } else if (data.type === 'DRAWING_COUNT') {
-        setDrawingCount(data.count || 0);
-      }
-    } catch {}
-  }, [syncStateToChart, onLevelChange, onPriceSelected, onQuickOrder, activePosition, onQuickExitPosition]);
+      } catch {}
+    },
+    [
+      syncStateToChart,
+      onLevelChange,
+      onPriceSelected,
+      onQuickOrder,
+      activePosition,
+      onQuickExitPosition,
+    ]
+  );
 
   // Listen for web iframe messages
   useEffect(() => {
@@ -1007,10 +1692,15 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
   return (
     <View style={styles.container}>
-      {/* Row 1: Timeframes & Indicator Toggles */}
+      {/* Row 1: Scrollable Multi-Timeframes (1m..1W) + Reset + Opacity Control */}
       <View style={styles.toolbar}>
-        <View style={styles.tfGroup}>
-          {['1m', '3m', '5m', '15m'].map((tf) => (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tfScroll}
+          contentContainerStyle={styles.tfGroup}
+        >
+          {['1m', '3m', '5m', '15m', '30m', '1H', '4H', '1D', '1W'].map((tf) => (
             <TouchableOpacity
               key={tf}
               style={[styles.tfBtn, timeframe === tf && styles.tfBtnActive]}
@@ -1026,9 +1716,60 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               </Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
 
-        <View style={styles.indicatorGroup}>
+        <View style={styles.rightControls}>
+          <TouchableOpacity
+            style={styles.resetChip}
+            onPress={handleResetChart}
+          >
+            <Text style={styles.resetChipText}>⟲ Auto</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.opacityChip,
+              overlayOpacity < 1 && styles.opacityChipDimmed,
+            ]}
+            onPress={handleCycleOpacity}
+          >
+            <Text style={styles.opacityChipText}>
+              👁️ {Math.round(overlayOpacity * 100)}%
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.boxChip, showTpSlBox && styles.boxChipActive]}
+            onPress={() => setShowTpSlBox((v) => !v)}
+          >
+            <Text
+              style={[
+                styles.boxChipText,
+                showTpSlBox && { color: '#34D399' },
+              ]}
+            >
+              📐 {showTpSlBox ? 'ON' : 'OFF'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Row 2: Native KLineChart Technical Indicators Bar (Main & Sub-Panes) */}
+      <View style={styles.indicatorBarWrap}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.indicatorBarContent}
+        >
+          <TouchableOpacity
+            style={[styles.indChip, showEMA9 && styles.indChipActiveEMA]}
+            onPress={onToggleEMA9}
+          >
+            <Text style={[styles.indChipText, showEMA9 && { color: '#06B6D4' }]}>
+              EMA 9/21
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={[styles.indChip, showVWAP && styles.indChipActiveVWAP]}
             onPress={onToggleVWAP}
@@ -1039,116 +1780,37 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.indChip, showEMA9 && styles.indChipActiveEMA]}
-            onPress={onToggleEMA9}
+            style={[styles.indChip, showBOLL && styles.indChipActiveBOLL]}
+            onPress={() => setShowBOLL((v) => !v)}
           >
-            <Text style={[styles.indChipText, showEMA9 && { color: '#06B6D4' }]}>
-              EMA 9
+            <Text style={[styles.indChipText, showBOLL && { color: '#A855F7' }]}>
+              BOLL
             </Text>
           </TouchableOpacity>
-        </View>
-      </View>
 
-      {/* Row 2: Pro Drawing & TP/SL Tools Bar */}
-      <View style={styles.drawingBarWrap}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.drawingBarContent}
-        >
+          <View style={styles.indDivider} />
+
           <TouchableOpacity
-            style={[styles.toolBtn, activeTool === 'DRAG' && styles.toolBtnActive]}
-            onPress={() => setActiveTool('DRAG')}
+            style={[styles.indChip, showVOL && styles.indChipActiveVOL]}
+            onPress={() => setShowVOL((v) => !v)}
           >
-            <Text
-              numberOfLines={1}
-              style={[styles.toolBtnText, activeTool === 'DRAG' && styles.toolBtnTextActive]}
-            >
-              ✋ Drag
+            <Text style={[styles.indChipText, showVOL && { color: '#34D399' }]}>
+              VOL
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[
-              styles.toolBtn,
-              showTpSlBox && styles.toolBtnBoxActive,
-            ]}
-            onPress={() => {
-              setShowTpSlBox(!showTpSlBox);
-              setActiveTool('TPSL');
-            }}
+            style={[styles.indChip, showRSI && styles.indChipActiveRSI]}
+            onPress={() => setShowRSI((v) => !v)}
           >
-            <Text
-              numberOfLines={1}
-              style={[
-                styles.toolBtnText,
-                showTpSlBox && { color: '#10B981' },
-              ]}
-            >
-              📐 TP/SL {showTpSlBox ? 'ON' : 'OFF'}
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.toolBtn, activeTool === 'HLINE' && styles.toolBtnActive]}
-            onPress={() => setActiveTool(activeTool === 'HLINE' ? 'DRAG' : 'HLINE')}
-          >
-            <Text
-              numberOfLines={1}
-              style={[styles.toolBtnText, activeTool === 'HLINE' && styles.toolBtnTextActive]}
-            >
-              ━ H-Line
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.toolBtn, activeTool === 'TRENDLINE' && styles.toolBtnActive]}
-            onPress={() => setActiveTool(activeTool === 'TRENDLINE' ? 'DRAG' : 'TRENDLINE')}
-          >
-            <Text
-              numberOfLines={1}
-              style={[styles.toolBtnText, activeTool === 'TRENDLINE' && styles.toolBtnTextActive]}
-            >
-              ╱ Trend
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.toolBtn,
-              drawingCount > 0 ? styles.undoBtnActive : styles.toolBtnMuted,
-            ]}
-            onPress={handleUndoDrawing}
-          >
-            <Text
-              numberOfLines={1}
-              style={[
-                styles.toolBtnText,
-                drawingCount > 0 && { color: '#FBBF24' },
-              ]}
-            >
-              ↩️ Undo
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.toolBtn,
-              drawingCount > 0 ? styles.clearBtnActive : styles.toolBtnMuted,
-            ]}
-            onPress={handleClearDrawings}
-          >
-            <Text
-              numberOfLines={1}
-              style={[styles.toolBtnText, drawingCount > 0 && { color: '#F87171' }]}
-            >
-              🗑️ Clear{drawingCount > 0 ? ` (${drawingCount})` : ''}
+            <Text style={[styles.indChipText, showRSI && { color: '#F472B6' }]}>
+              RSI
             </Text>
           </TouchableOpacity>
         </ScrollView>
       </View>
 
-      {/* Main Chart Area */}
+      {/* Main KLineChart v9 + Left Drawing Rail + Draggable Order Overlay */}
       {Platform.OS === 'web' ? (
         <iframe
           ref={iframeRef}
@@ -1178,8 +1840,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       {/* Legend & Quick Level Bar */}
       <View style={styles.legendContainer}>
         <View style={styles.legendItem}>
-          <View style={[styles.dot, { backgroundColor: '#38BDF8' }]} />
-          <Text style={styles.legendText}>Entry: ₹{entryPrice.toFixed(1)}</Text>
+          {orderType === 'MARKET' ? (
+            <Text style={[styles.legendText, { color: '#FBBF24' }]}>
+              MKT @ ₹{entryPrice.toFixed(1)}
+            </Text>
+          ) : (
+            <>
+              <View style={[styles.dot, { backgroundColor: '#38BDF8' }]} />
+              <Text style={styles.legendText}>Entry: ₹{entryPrice.toFixed(1)}</Text>
+            </>
+          )}
         </View>
         {stopLossPrice && stopLossPrice > 0 ? (
           <View style={styles.legendItem}>
@@ -1238,16 +1908,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 8,
     paddingVertical: 4,
+    gap: 6,
     backgroundColor: '#1E293B',
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
+  tfScroll: {
+    flex: 1,
+    minWidth: 0,
+  },
   tfGroup: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 4,
+    paddingRight: 4,
   },
   tfBtn: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     paddingVertical: 3,
     borderRadius: 4,
     backgroundColor: '#0F172A',
@@ -1263,15 +1940,83 @@ const styles = StyleSheet.create({
   tfBtnTextActive: {
     color: '#0F172A',
   },
-  indicatorGroup: {
+  rightControls: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  resetChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  resetChipText: {
+    color: '#38BDF8',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  opacityChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  opacityChipDimmed: {
+    borderColor: '#F59E0B',
+    backgroundColor: 'rgba(245, 158, 11, 0.14)',
+  },
+  opacityChipText: {
+    color: '#E2E8F0',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  boxChip: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 5,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  boxChipActive: {
+    borderColor: '#10B981',
+    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+  },
+  boxChipText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  indicatorBarWrap: {
+    backgroundColor: '#0B1120',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+    flexGrow: 0,
+  },
+  indicatorBarContent: {
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     gap: 6,
   },
+  indDivider: {
+    width: 1,
+    height: 14,
+    backgroundColor: '#334155',
+    marginHorizontal: 2,
+  },
   indChip: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    backgroundColor: '#0F172A',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 5,
+    backgroundColor: '#1E293B',
     borderWidth: 1,
     borderColor: '#334155',
   },
@@ -1283,63 +2028,22 @@ const styles = StyleSheet.create({
     borderColor: '#06B6D4',
     backgroundColor: 'rgba(6, 182, 212, 0.15)',
   },
-  indChipText: {
-    color: '#64748B',
-    fontSize: 9,
-    fontWeight: '700',
+  indChipActiveBOLL: {
+    borderColor: '#A855F7',
+    backgroundColor: 'rgba(168, 85, 247, 0.15)',
   },
-  drawingBarWrap: {
-    backgroundColor: '#0B1120',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-    flexGrow: 0,
-  },
-  drawingBarContent: {
-    flexGrow: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 6,
-    paddingVertical: 5,
-    gap: 4,
-  },
-  toolBtn: {
-    flexGrow: 1,
-    paddingVertical: 4,
-    paddingHorizontal: 7,
-    borderRadius: 5,
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toolBtnActive: {
-    backgroundColor: 'rgba(56, 189, 248, 0.18)',
-    borderColor: '#38BDF8',
-  },
-  toolBtnBoxActive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+  indChipActiveVOL: {
     borderColor: '#10B981',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
   },
-  undoBtnActive: {
-    borderColor: '#F59E0B',
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+  indChipActiveRSI: {
+    borderColor: '#F472B6',
+    backgroundColor: 'rgba(244, 114, 182, 0.15)',
   },
-  clearBtnActive: {
-    borderColor: '#EF4444',
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-  },
-  toolBtnMuted: {
-    opacity: 0.65,
-  },
-  toolBtnText: {
+  indChipText: {
     color: '#94A3B8',
     fontSize: 10,
     fontWeight: '700',
-  },
-  toolBtnTextActive: {
-    color: '#38BDF8',
   },
   webview: {
     flex: 1,

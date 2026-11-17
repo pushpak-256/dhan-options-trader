@@ -92,7 +92,7 @@ export function generateMockOptionChain(indexKey: string): OptionChainData {
     expiryDates: [
       expiry,
       getNextWeekExpiry(indexKey),
-      '2026-11-26',
+      '2026-12-03',
       '2026-12-31',
     ],
     selectedExpiry: expiry,
@@ -100,22 +100,76 @@ export function generateMockOptionChain(indexKey: string): OptionChainData {
   };
 }
 
-export function generateMockCandles(basePrice: number, count: number = 80): CandleData[] {
-  const candles: CandleData[] = [];
-  const now = Math.floor(Date.now() / 1000);
-  const intervalSeconds = 300; // 5 minute candles
+export const TIMEFRAME_SECONDS: Record<string, number> = {
+  '1m': 60,
+  '3m': 180,
+  '5m': 300,
+  '15m': 900,
+  '30m': 1800,
+  '1H': 3600,
+  '4H': 14400,
+  '1D': 86400,
+  '1W': 604800,
+};
 
+const TIMEFRAME_VOLATILITY: Record<string, number> = {
+  '1m': 0.011,
+  '3m': 0.019,
+  '5m': 0.025,
+  '15m': 0.038,
+  '30m': 0.05,
+  '1H': 0.065,
+  '4H': 0.09,
+  '1D': 0.12,
+  '1W': 0.18,
+};
+
+export function normalizeTimeframe(timeframe: string = '5m'): string {
+  const trimmed = (timeframe || '5m').trim();
+  const upper = trimmed.toUpperCase();
+  if (upper === '1M') return '1m';
+  if (upper === '3M') return '3m';
+  if (upper === '5M') return '5m';
+  if (upper === '15M') return '15m';
+  if (upper === '30M') return '30m';
+  if (upper === '1H') return '1H';
+  if (upper === '4H') return '4H';
+  if (upper === '1D') return '1D';
+  if (upper === '1W') return '1W';
+  return TIMEFRAME_SECONDS[trimmed] ? trimmed : '5m';
+}
+
+export function getTimeframeSeconds(timeframe: string = '5m'): number {
+  const normalized = normalizeTimeframe(timeframe);
+  return TIMEFRAME_SECONDS[normalized] ?? 300;
+}
+
+export function generateMockCandles(
+  basePrice: number,
+  count: number = 80,
+  timeframe: string = '5m'
+): CandleData[] {
+  const candles: CandleData[] = [];
+  const normalizedTf = normalizeTimeframe(timeframe);
+  const intervalSeconds = TIMEFRAME_SECONDS[normalizedTf] ?? 300;
+  const volFactor = TIMEFRAME_VOLATILITY[normalizedTf] ?? 0.025;
+  const volumeScale = Math.max(0.25, Math.sqrt(intervalSeconds / 300));
+
+  const nowAligned = Math.floor(Date.now() / 1000 / intervalSeconds) * intervalSeconds;
   let currentPrice = Math.max(15, basePrice * 0.85);
 
   for (let i = count; i >= 0; i--) {
-    const time = now - i * intervalSeconds;
-    const volatility = currentPrice * 0.025;
-    const open = currentPrice;
+    const time = nowAligned - i * intervalSeconds;
+    const volatility = currentPrice * volFactor;
+    const open = Number(currentPrice.toFixed(2));
     const change = (Math.random() - 0.48) * volatility;
     const close = Math.max(5, Number((open + change).toFixed(2)));
     const high = Number((Math.max(open, close) + Math.random() * (volatility * 0.6)).toFixed(2));
-    const low = Number((Math.min(open, close) - Math.random() * (volatility * 0.6)).toFixed(2));
-    const volume = Math.floor(5000 + Math.random() * 45000);
+    const low = Math.max(
+      0.05,
+      Number((Math.min(open, close) - Math.random() * (volatility * 0.6)).toFixed(2))
+    );
+    const volume = Math.floor((5000 + Math.random() * 45000) * volumeScale);
 
     candles.push({
       time,

@@ -18,9 +18,116 @@ import { SUPPORTED_INDICES } from '../constants/indices';
 import {
   generateMockOptionChain,
   generateMockCandles,
+  normalizeTimeframe,
   MOCK_FUND_LIMIT,
   MOCK_POSITIONS,
 } from './mockData';
+
+const MONDAY_EPOCH_OFFSET_SECONDS = 4 * 86400; // Jan 5, 1970 00:00:00 UTC (Monday)
+
+const INTRADAY_TIMEFRAME_CONFIG: Record<
+  string,
+  { dhanInterval: '1' | '5' | '15' | '25' | '60'; lookbackDays: number; resampleSeconds?: number }
+> = {
+  '1m': { dhanInterval: '1', lookbackDays: 5 },
+  '3m': { dhanInterval: '1', lookbackDays: 7, resampleSeconds: 180 },
+  '5m': { dhanInterval: '5', lookbackDays: 15 },
+  '15m': { dhanInterval: '15', lookbackDays: 30 },
+  '30m': { dhanInterval: '15', lookbackDays: 45, resampleSeconds: 1800 },
+  '1H': { dhanInterval: '60', lookbackDays: 60 },
+  '4H': { dhanInterval: '60', lookbackDays: 90, resampleSeconds: 14400 },
+};
+
+function formatDateYMD(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getPastDateYMD(daysAgo: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return formatDateYMD(d);
+}
+
+function parseDhanChartResponse(data: any): CandleData[] {
+  if (!data || !Array.isArray(data.open) || !Array.isArray(data.timestamp)) {
+    return [];
+  }
+
+  const opens: number[] = data.open;
+  const highs: number[] = Array.isArray(data.high) ? data.high : opens;
+  const lows: number[] = Array.isArray(data.low) ? data.low : opens;
+  const closes: number[] = Array.isArray(data.close) ? data.close : opens;
+  const timestamps: number[] = data.timestamp;
+  const volumes: number[] = Array.isArray(data.volume) ? data.volume : [];
+
+  const len = Math.min(opens.length, highs.length, lows.length, closes.length, timestamps.length);
+  const candles: CandleData[] = [];
+
+  for (let i = 0; i < len; i++) {
+    const rawTs = Number(timestamps[i]);
+    const open = Number(opens[i]);
+    const high = Number(highs[i]);
+    const low = Number(lows[i]);
+    const close = Number(closes[i]);
+    if (!Number.isFinite(rawTs) || !Number.isFinite(open) || !Number.isFinite(close)) {
+      continue;
+    }
+    const time = rawTs > 1e12 ? Math.floor(rawTs / 1000) : Math.floor(rawTs);
+    candles.push({
+      time,
+      open,
+      high: Number.isFinite(high) ? high : Math.max(open, close),
+      low: Number.isFinite(low) ? low : Math.min(open, close),
+      close,
+      volume: Number(volumes[i]) || 0,
+    });
+  }
+
+  candles.sort((a, b) => a.time - b.time);
+  return candles;
+}
+
+/**
+ * Resample lower-timeframe OHLCV candles into larger timeframe buckets
+ * (e.g. 1m -> 3m, 15m -> 30m, 1H -> 4H, 1D -> 1W).
+ */
+export function aggregateCandles(candles: CandleData[], bucketSeconds: number): CandleData[] {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+  if (!Number.isFinite(bucketSeconds) || bucketSeconds <= 0) return candles.slice();
+
+  const sorted = candles.slice().sort((a, b) => a.time - b.time);
+  const buckets = new Map<number, CandleData>();
+  const isWeekly = bucketSeconds === 604800;
+
+  for (const c of sorted) {
+    const bucketTime = isWeekly
+      ? Math.floor((c.time - MONDAY_EPOCH_OFFSET_SECONDS) / 604800) * 604800 +
+        MONDAY_EPOCH_OFFSET_SECONDS
+      : Math.floor(c.time / bucketSeconds) * bucketSeconds;
+
+    const existing = buckets.get(bucketTime);
+    if (!existing) {
+      buckets.set(bucketTime, {
+        time: bucketTime,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: Number(c.volume) || 0,
+      });
+    } else {
+      existing.high = Math.max(existing.high, c.high);
+      existing.low = Math.min(existing.low, c.low);
+      existing.close = c.close;
+      existing.volume = (existing.volume || 0) + (Number(c.volume) || 0);
+    }
+  }
+
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+}
 
 function getDhanBaseUrl(): string {
   // On deployed web (PWA on Netlify), route via stateless /api/dhan proxy to avoid browser CORS blocks.
@@ -313,52 +420,75 @@ export class DhanApiService {
     }
   }
 
-  // 4. Intraday / Historical Candlestick Chart Data
+  static aggregateCandles = aggregateCandles;
+
+  // 4. Intraday / Historical Candlestick Chart Data (1m, 3m, 5m, 15m, 30m, 1H, 4H, 1D, 1W)
   static async getChartCandles(
     securityId: string,
     exchangeSegment: string,
-    instrument: string = 'OPTIDX'
+    instrument: string = 'OPTIDX',
+    timeframe: string = '5m'
   ): Promise<CandleData[]> {
+    const normalizedTf = normalizeTimeframe(timeframe);
+    const fallbackBasePrice = securityId.includes('CE') ? 145 : securityId.includes('PE') ? 120 : 150;
+
     const isDemo = await this.isDemoMode();
     if (isDemo || securityId.startsWith('MOCK_')) {
-      // Estimate baseline price from securityId or default
-      const basePrice = securityId.includes('CE') ? 145 : 120;
-      return generateMockCandles(basePrice, 100);
+      return generateMockCandles(fallbackBasePrice, 100, normalizedTf);
     }
 
     try {
       const client = await this.getClient();
+      const todayYMD = formatDateYMD(new Date());
+
+      // Daily & Weekly timeframes -> DhanHQ v2 /charts/historical
+      if (normalizedTf === '1D' || normalizedTf === '1W') {
+        const lookbackDays = normalizedTf === '1W' ? 730 : 180;
+        const fromDate = getPastDateYMD(lookbackDays);
+
+        const res = await client.post('/charts/historical', {
+          securityId,
+          exchangeSegment,
+          instrument,
+          expiryCode: 0,
+          oi: false,
+          fromDate,
+          toDate: todayYMD,
+        });
+
+        const dailyCandles = parseDhanChartResponse(res.data);
+        if (dailyCandles.length > 0) {
+          return normalizedTf === '1W'
+            ? aggregateCandles(dailyCandles, 604800)
+            : dailyCandles;
+        }
+        return generateMockCandles(fallbackBasePrice, 100, normalizedTf);
+      }
+
+      // Intraday timeframes (1m, 3m, 5m, 15m, 30m, 1H, 4H) -> DhanHQ v2 /charts/intraday
+      const tfConfig = INTRADAY_TIMEFRAME_CONFIG[normalizedTf] || INTRADAY_TIMEFRAME_CONFIG['5m'];
+      const fromDate = `${getPastDateYMD(tfConfig.lookbackDays)} 09:15:00`;
+      const toDate = `${todayYMD} 23:59:59`;
+
       const res = await client.post('/charts/intraday', {
         securityId,
         exchangeSegment,
         instrument,
-        interval: '5', // 5-minute candles
+        interval: tfConfig.dhanInterval,
+        oi: false,
+        fromDate,
+        toDate,
       });
 
-      if (res.data && Array.isArray(res.data.open)) {
-        const opens = res.data.open;
-        const highs = res.data.high;
-        const lows = res.data.low;
-        const closes = res.data.close;
-        const timestamps = res.data.timestamp;
-        const volumes = res.data.volume || [];
-
-        const candles: CandleData[] = [];
-        for (let i = 0; i < opens.length; i++) {
-          candles.push({
-            time: timestamps[i],
-            open: opens[i],
-            high: highs[i],
-            low: lows[i],
-            close: closes[i],
-            volume: volumes[i],
-          });
-        }
-        return candles;
+      const intradayCandles = parseDhanChartResponse(res.data);
+      if (intradayCandles.length > 0) {
+        return tfConfig.resampleSeconds
+          ? aggregateCandles(intradayCandles, tfConfig.resampleSeconds)
+          : intradayCandles;
       }
-      return generateMockCandles(150, 100);
+      return generateMockCandles(fallbackBasePrice, 100, normalizedTf);
     } catch {
-      return generateMockCandles(150, 100);
+      return generateMockCandles(fallbackBasePrice, 100, normalizedTf);
     }
   }
 
