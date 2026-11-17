@@ -1,0 +1,17 @@
+{
+  "name": "Dhan Options Trader",
+  "short_name": "DhanTrader",
+  "description": "Options Trading Terminal with Visual Chart Orders & Risk Guardrails",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0B1120",
+  "background_color": "#0F172A",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ]
+}

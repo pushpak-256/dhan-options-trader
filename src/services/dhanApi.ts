@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import axios, { AxiosInstance } from 'axios';
 import {
   DhanCredentials,
@@ -11,6 +12,7 @@ import {
   DhanOrder,
 } from '../types/dhan';
 import { StorageService } from './storage';
+import { SUPPORTED_INDICES } from '../constants/indices';
 import {
   generateMockOptionChain,
   generateMockCandles,
@@ -18,7 +20,19 @@ import {
   MOCK_POSITIONS,
 } from './mockData';
 
-const DHAN_BASE_URL = 'https://api.dhan.co/v2';
+function getDhanBaseUrl(): string {
+  // On deployed web (PWA on Netlify), route via stateless /api/dhan proxy to avoid browser CORS blocks.
+  // On native iOS/Android APK, connect directly to DhanHQ v2 API.
+  if (
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    !window.location.hostname.includes('localhost') &&
+    !window.location.hostname.includes('127.0.0.1')
+  ) {
+    return '/api/dhan';
+  }
+  return 'https://api.dhan.co/v2';
+}
 
 export class DhanApiService {
   private static client: AxiosInstance | null = null;
@@ -29,7 +43,7 @@ export class DhanApiService {
     this.cachedCreds = creds;
 
     return axios.create({
-      baseURL: DHAN_BASE_URL,
+      baseURL: getDhanBaseUrl(),
       headers: {
         'access-token': creds?.accessToken || '',
         'client-id': creds?.clientId || '',
@@ -59,11 +73,34 @@ export class DhanApiService {
 
     try {
       const client = await this.getClient();
-      const res = await client.get('/profile');
-      return res.data;
+      const creds = await StorageService.getCredentials();
+      try {
+        const res = await client.get('/profile');
+        return {
+          dhanClientId: res.data.dhanClientId || creds?.clientId || '',
+          clientName: res.data.clientName || `Dhan Trader (${creds?.clientId})`,
+          email: res.data.email || '',
+          mobile: res.data.mobile || '',
+          status: res.data.tokenValidity || 'ACTIVE',
+        };
+      } catch {
+        // Fallback: verify token via /fundlimit (supported across all DhanHQ v2 accounts)
+        const fundRes = await client.get('/fundlimit');
+        return {
+          dhanClientId: fundRes.data.dhanClientId || creds?.clientId || '',
+          clientName: `Dhan Account ${fundRes.data.dhanClientId || creds?.clientId}`,
+          email: '',
+          mobile: '',
+          status: 'ACTIVE',
+        };
+      }
     } catch (err: any) {
-      console.warn('Dhan profile fetch failed, using fallback:', err.message);
-      throw new Error(err.response?.data?.message || 'Invalid Dhan Client ID or Access Token.');
+      console.warn('Dhan profile verification failed:', err.message);
+      throw new Error(
+        err.response?.data?.internalErrorMessage ||
+          err.response?.data?.message ||
+          'Connection failed. Verify Client ID & Access Token (and note browser CORS on localhost).'
+      );
     }
   }
 
@@ -78,10 +115,10 @@ export class DhanApiService {
       const client = await this.getClient();
       const res = await client.get('/fundlimit');
       return {
-        availMargin: res.data.availMargin || 0,
-        utilizedMargin: res.data.utilizedMargin || 0,
-        collateralMargin: res.data.collateralMargin || 0,
-        cashBalance: res.data.cashBalance || 0,
+        availMargin: res.data.availabelBalance ?? res.data.availMargin ?? 0,
+        utilizedMargin: res.data.utilizedAmount ?? res.data.utilizedMargin ?? 0,
+        collateralMargin: res.data.collateralAmount ?? res.data.collateralMargin ?? 0,
+        cashBalance: res.data.withdrawableBalance ?? res.data.sodLimit ?? res.data.cashBalance ?? 0,
       };
     } catch {
       return MOCK_FUND_LIMIT;
@@ -99,17 +136,32 @@ export class DhanApiService {
 
     try {
       const client = await this.getClient();
+      const idxConfig = SUPPORTED_INDICES[indexKey] || SUPPORTED_INDICES.NIFTY;
+      const underlyingScrip = Number(idxConfig.underlyingSecurityId) || 13;
+
+      let targetExpiry = expiry;
+      if (!targetExpiry) {
+        const expRes = await client.post('/optionchain/expirylist', {
+          UnderlyingScrip: underlyingScrip,
+          UnderlyingSeg: 'IDX_I',
+        });
+        if (expRes.data?.data?.length > 0) {
+          targetExpiry = expRes.data.data[0];
+        }
+      }
+
       const res = await client.post('/optionchain', {
-        Underlying: indexKey,
-        Expiry: expiry,
+        UnderlyingScrip: underlyingScrip,
+        UnderlyingSeg: 'IDX_I',
+        Expiry: targetExpiry,
       });
 
-      if (res.data && res.data.data) {
+      if (res.data && res.data.data && Array.isArray(res.data.data.strikes)) {
         return res.data.data;
       }
       return generateMockOptionChain(indexKey);
     } catch {
-      // Graceful fallback to mock feed if offline or after hours
+      // Graceful fallback to mock feed if offline, after hours, or Data API inactive
       return generateMockOptionChain(indexKey);
     }
   }

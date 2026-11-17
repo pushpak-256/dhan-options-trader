@@ -7,7 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.antigravity.dhantrader"
     },
     "android": {
       "package": "com.antigravity.dhantrader",
@@ -27,7 +28,15 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "name": "Dhan Options Trader",
+      "shortName": "DhanTrader",
+      "description": "Options Trading Terminal with Visual Chart Orders & Risk Guardrails",
+      "display": "standalone",
+      "themeColor": "#0B1120",
+      "backgroundColor": "#0F172A",
+      "orientation": "portrait"
     }
   }
 }
