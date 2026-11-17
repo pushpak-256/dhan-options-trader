@@ -153,17 +153,24 @@ export class DhanApiService {
       const idxConfig = SUPPORTED_INDICES[indexKey] || SUPPORTED_INDICES.NIFTY;
       const underlyingScrip = Number(idxConfig.underlyingSecurityId) || 13;
 
-      // --- Fetch expiry list if none supplied ---
+      // --- Always fetch expiry list so UI retains all expiry chips ---
       let expiryDates: string[] = [];
       let targetExpiry = expiry;
-      if (!targetExpiry) {
+      try {
         const expRes = await client.post('/optionchain/expirylist', {
           UnderlyingScrip: underlyingScrip,
           UnderlyingSeg: 'IDX_I',
         });
         if (expRes.data?.data?.length > 0) {
           expiryDates = expRes.data.data;
-          targetExpiry = expiryDates[0];
+          if (!targetExpiry) {
+            targetExpiry = expiryDates[0];
+          }
+        }
+      } catch {
+        // If expiry list fetch fails, continue with what we have
+        if (!targetExpiry) {
+          return generateMockOptionChain(indexKey);
         }
       }
 
@@ -281,6 +288,16 @@ export class DhanApiService {
           }
         }
         closest.isATM = true;
+      }
+
+      // Window ±12 strikes around ATM so the UI opens centered, not at deep ITM
+      const ATM_WINDOW = 12;
+      const atmIndex = strikes.findIndex((s) => s.isATM);
+      if (atmIndex >= 0 && strikes.length > ATM_WINDOW * 2 + 1) {
+        const start = Math.max(0, Math.min(atmIndex - ATM_WINDOW, strikes.length - (ATM_WINDOW * 2 + 1)));
+        const end = Math.min(strikes.length, start + ATM_WINDOW * 2 + 1);
+        strikes.splice(end);
+        strikes.splice(0, start);
       }
 
       return {
@@ -478,9 +495,11 @@ export class DhanApiService {
         const costPrice: number = p.costPrice ?? (netQty > 0 ? buyAvg : sellAvg);
 
         // Safely compute ltp: use raw ltp if present, else derive from costPrice + unrealizedProfit
+        // For both long and short: unrealizedProfit = (ltp - costPrice) * netQty
+        // So: ltp = costPrice + unrealizedProfit / netQty (signed, not abs)
         let ltp: number = p.ltp ?? 0;
         if (!ltp && costPrice && netQty !== 0) {
-          ltp = costPrice + unrealizedProfit / Math.abs(netQty);
+          ltp = Math.max(0, Number((costPrice + unrealizedProfit / netQty).toFixed(2)));
         }
 
         // Safely compute dayPnl: use raw dayPnl if present, else sum realized + unrealized

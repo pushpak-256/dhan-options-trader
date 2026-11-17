@@ -1,5 +1,5 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { View, StyleSheet, Text, TouchableOpacity, Platform } from 'react-native';
+import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import { View, StyleSheet, Text, TouchableOpacity, Platform, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { CandleData, TransactionType, DhanPosition } from '../types/dhan';
 import { calculateVWAP, calculateEMA } from '../utils/indicators';
@@ -61,17 +61,32 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
   const totalQty = lotSize * lots;
 
+  // Detect whether SL / TP are placed on the wrong side of Entry
+  const isSlInverted =
+    !!stopLossPrice &&
+    stopLossPrice > 0 &&
+    (transactionType === 'BUY'
+      ? stopLossPrice >= entryPrice
+      : stopLossPrice <= entryPrice);
+
+  const isTpInverted =
+    !!targetPrice &&
+    targetPrice > 0 &&
+    (transactionType === 'BUY'
+      ? targetPrice <= entryPrice
+      : targetPrice >= entryPrice);
+
   // Calculate SL risk & TP reward
-  const slRiskPts = stopLossPrice ? Math.abs(entryPrice - stopLossPrice) : 0;
+  const slRiskPts = stopLossPrice && !isSlInverted ? Math.abs(entryPrice - stopLossPrice) : 0;
   const slRiskRupees = slRiskPts * totalQty;
 
-  const tpRewardPts = targetPrice ? Math.abs(targetPrice - entryPrice) : 0;
+  const tpRewardPts = targetPrice && !isTpInverted ? Math.abs(targetPrice - entryPrice) : 0;
   const tpRewardRupees = tpRewardPts * totalQty;
 
-  const rrRatio = slRiskPts > 0 ? (tpRewardPts / slRiskPts).toFixed(2) : '0';
+  const rrRatio = slRiskPts > 0 && tpRewardPts > 0 ? (tpRewardPts / slRiskPts).toFixed(2) : '-';
 
   // Helper to send commands to chart without reloading iframe/webview
-  const postToChart = (payload: Record<string, any>) => {
+  const postToChart = useCallback((payload: Record<string, any>) => {
     const msg = JSON.stringify(payload);
     if (Platform.OS === 'web') {
       try {
@@ -84,10 +99,9 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         );
       } catch {}
     }
-  };
+  }, []);
 
-  // Sync dynamic state (Entry, SL, TP, side, qty, tool, active position) smoothly to chart
-  useEffect(() => {
+  const syncStateToChart = useCallback(() => {
     postToChart({
       type: 'SYNC_STATE',
       side: transactionType,
@@ -107,6 +121,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         : null,
     });
   }, [
+    postToChart,
     transactionType,
     entryPrice,
     stopLossPrice,
@@ -117,6 +132,15 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     activeLineType,
     activePosition,
   ]);
+
+  // Sync dynamic state (Entry, SL, TP, side, qty, tool, active position) smoothly to chart
+  useEffect(() => {
+    syncStateToChart();
+  }, [syncStateToChart]);
+
+  const handleUndoDrawing = () => {
+    postToChart({ type: 'UNDO_DRAWING' });
+  };
 
   const handleClearDrawings = () => {
     postToChart({ type: 'CLEAR_DRAWINGS' });
@@ -129,6 +153,13 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     const vwapData = showVWAP ? calculateVWAP(candles) : [];
     const ema9Data = showEMA9 ? calculateEMA(candles, 9) : [];
     const initialEntry = candles.length > 0 ? candles[candles.length - 1].close : entryPrice;
+    const safeSymbol = String(symbol)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    const safeJson = (val: unknown) => JSON.stringify(val).replace(/</g, '\\u003c');
 
     return `<!DOCTYPE html>
 <html>
@@ -155,11 +186,14 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         border-radius: 6px;
         border: 1px solid rgba(255,255,255,0.08);
         pointer-events: none;
+        max-width: calc(100% - 230px);
+        overflow: hidden;
+        white-space: nowrap;
       }
-      .symbol-text { color: #F8FAFC; font-weight: 700; font-size: 11px; }
-      .ltp-text { color: #38BDF8; font-weight: 700; font-size: 11px; }
-      .vwap-indicator { color: #F59E0B; font-size: 9px; font-weight: 700; }
-      .ema-indicator { color: #06B6D4; font-size: 9px; font-weight: 700; }
+      .symbol-text { color: #F8FAFC; font-weight: 700; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+      .ltp-text { color: #38BDF8; font-weight: 700; font-size: 11px; flex-shrink: 0; }
+      .vwap-indicator { color: #F59E0B; font-size: 9px; font-weight: 700; flex-shrink: 0; }
+      .ema-indicator { color: #06B6D4; font-size: 9px; font-weight: 700; flex-shrink: 0; }
       .quick-order-bar {
         position: absolute;
         top: 6px;
@@ -179,6 +213,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         cursor: pointer;
         box-shadow: 0 2px 6px rgba(0,0,0,0.4);
         letter-spacing: 0.3px;
+        white-space: nowrap;
       }
       .qbtn:active { transform: scale(0.95); }
       .qbtn-buy { background: rgba(16, 185, 129, 0.92); border: 1px solid #34D399; }
@@ -187,7 +222,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       .hint-pill {
         position: absolute;
         bottom: 32px;
-        left: 10px;
+        left: 8px;
         z-index: 25;
         background: rgba(15, 23, 42, 0.85);
         color: #94A3B8;
@@ -197,6 +232,22 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         border-radius: 4px;
         border: 1px solid rgba(148, 163, 184, 0.25);
         pointer-events: none;
+        max-width: calc(100% - 82px);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      @media (max-width: 440px) {
+        .chart-header {
+          padding: 3px 6px;
+          gap: 4px;
+          max-width: calc(100% - 205px);
+        }
+        .symbol-text, .ltp-text { font-size: 10px; }
+        .vwap-indicator, .ema-indicator { display: none; }
+        .quick-order-bar { right: 64px; gap: 4px; }
+        .qbtn { padding: 3px 6px; font-size: 9px; letter-spacing: 0.1px; }
+        .hint-pill { font-size: 9px; padding: 2px 6px; bottom: 28px; }
       }
     </style>
   </head>
@@ -206,7 +257,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       <canvas id="overlayCanvas"></canvas>
 
       <div class="chart-header">
-        <span class="symbol-text">${symbol}</span>
+        <span class="symbol-text">${safeSymbol}</span>
         <span class="ltp-text" id="ltpHeader">₹${initialEntry.toFixed(2)}</span>
         ${showVWAP ? '<span class="vwap-indicator">• VWAP</span>' : ''}
         ${showEMA9 ? '<span class="ema-indicator">• EMA 9</span>' : ''}
@@ -215,7 +266,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       <div class="quick-order-bar">
         <button class="qbtn qbtn-buy" id="btnQuickBuy">BUY</button>
         <button class="qbtn qbtn-sell" id="btnQuickSell">SELL</button>
-        <button class="qbtn qbtn-exit" id="btnQuickExit" style="display:none;">✕ EXIT POS</button>
+        <button class="qbtn qbtn-exit" id="btnQuickExit" style="display:none;">✕ EXIT</button>
       </div>
 
       <div class="hint-pill" id="hintPill">✋ Drag ENTRY / SL / TP handles directly on chart</div>
@@ -277,7 +328,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         wickDownColor: '#EF4444',
       });
 
-      const rawCandles = ${JSON.stringify(candles)};
+      const rawCandles = ${safeJson(candles)};
       candleSeries.setData(rawCandles);
 
       ${
@@ -288,7 +339,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           lineWidth: 1.5,
           title: 'VWAP',
         });
-        vwapSeries.setData(${JSON.stringify(vwapData)});
+        vwapSeries.setData(${safeJson(vwapData)});
       `
           : ''
       }
@@ -301,24 +352,25 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           lineWidth: 1.5,
           title: 'EMA 9',
         });
-        ema9Series.setData(${JSON.stringify(ema9Data)});
+        ema9Series.setData(${safeJson(ema9Data)});
       `
           : ''
       }
 
       // Mutable interactive state
       const state = {
-        side: '${transactionType}',
-        entry: ${entryPrice},
-        sl: ${stopLossPrice || 0},
-        tp: ${targetPrice || 0},
-        totalQty: ${totalQty},
+        side: ${safeJson(transactionType)},
+        entry: ${Number(entryPrice) || 0},
+        sl: ${Number(stopLossPrice) || 0},
+        tp: ${Number(targetPrice) || 0},
+        totalQty: ${Number(totalQty) || 0},
         showTpSlBox: true,
         tool: 'DRAG',
-        activeLineType: '${activeLineType}',
+        activeLineType: ${safeJson(activeLineType)},
         activePosition: null,
         hLines: [], // [{ id, price }]
         trendLines: [], // [{ id, p1: {time, price}, p2: {time, price} }]
+        drawingHistory: [], // ['HLINE' | 'TRENDLINE']
         pendingTrendStart: null,
       };
 
@@ -330,6 +382,18 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         return Math.max(0.05, Math.round(p * 20) / 20);
       }
 
+      function getPlotWidth() {
+        const W = container.clientWidth;
+        let rightAxisW = 68;
+        try {
+          const psW = chart.priceScale('right').width();
+          if (typeof psW === 'number' && psW > 30) {
+            rightAxisW = Math.ceil(psW) + 4;
+          }
+        } catch (e) {}
+        return Math.max(100, W - rightAxisW);
+      }
+
       function resizeCanvas() {
         const dpr = window.devicePixelRatio || 1;
         canvas.width = container.clientWidth * dpr;
@@ -338,17 +402,54 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         drawOverlay();
       }
 
-      function drawPill(x, y, text, bgColor, textColor = '#FFFFFF', borderColor = null) {
-        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-        const metrics = ctx.measureText(text);
-        const padX = 7;
-        const h = 18;
-        const w = metrics.width + padX * 2;
+      function drawRoundedRect(x, y, w, h, r) {
+        if (typeof ctx.roundRect === 'function') {
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, r);
+        } else {
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.lineTo(x + w - r, y);
+          ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+          ctx.lineTo(x + w, y + h - r);
+          ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+          ctx.lineTo(x + r, y + h);
+          ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+          ctx.lineTo(x, y + r);
+          ctx.quadraticCurveTo(x, y, x + r, y);
+          ctx.closePath();
+        }
+      }
+
+      function drawPill(x, y, text, bgColor, textColor = '#FFFFFF', borderColor = null, options = {}) {
+        const isCompact = !!options.compact;
+        const align = options.align || 'left';
+        const minX = typeof options.minX === 'number' ? options.minX : 6;
+        const maxX = typeof options.maxX === 'number' ? options.maxX : Math.max(80, getPlotWidth() - 6);
+
+        ctx.font = (isCompact ? 'bold 9.5px ' : 'bold 10px ') + '-apple-system, BlinkMacSystemFont, sans-serif';
+        const padX = isCompact ? 5 : 7;
+        const h = isCompact ? 17 : 18;
+        const maxAllowedW = Math.max(44, maxX - minX);
+
+        let displayText = text;
+        let textW = ctx.measureText(displayText).width;
+        if (textW + padX * 2 > maxAllowedW) {
+          const ellipsis = '…';
+          while (displayText.length > 4 && ctx.measureText(displayText + ellipsis).width + padX * 2 > maxAllowedW) {
+            displayText = displayText.slice(0, -1);
+          }
+          displayText = displayText + ellipsis;
+          textW = ctx.measureText(displayText).width;
+        }
+
+        const w = Math.min(maxAllowedW, textW + padX * 2);
+        let drawX = align === 'right' ? (x - w) : x;
+        drawX = Math.max(minX, Math.min(maxX - w, drawX));
         const top = y - h / 2;
 
         ctx.fillStyle = bgColor;
-        ctx.beginPath();
-        ctx.roundRect(x, top, w, h, 4);
+        drawRoundedRect(drawX, top, w, h, 4);
         ctx.fill();
 
         if (borderColor) {
@@ -359,32 +460,38 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
         ctx.fillStyle = textColor;
         ctx.textBaseline = 'middle';
-        ctx.fillText(text, x + padX, y + 0.5);
-        return { x, y: top, w, h };
+        ctx.fillText(displayText, drawX + padX, y + 0.5);
+        return { x: drawX, y: top, w, h };
       }
 
       function drawOverlay() {
         const W = container.clientWidth;
         const H = container.clientHeight;
-        const plotW = Math.max(100, W - 64); // leave price axis uncovered
+        const plotW = getPlotWidth();
+        const isCompact = W <= 420;
+        const pillRightEdge = plotW - 6;
         ctx.clearRect(0, 0, W, H);
 
         const yEntry = state.entry > 0 ? candleSeries.priceToCoordinate(state.entry) : null;
         const ySL = state.sl > 0 ? candleSeries.priceToCoordinate(state.sl) : null;
         const yTP = state.tp > 0 ? candleSeries.priceToCoordinate(state.tp) : null;
 
+        const isBuy = state.side === 'BUY';
+        const slInverted = state.sl > 0 && state.entry > 0 && (isBuy ? state.sl >= state.entry : state.sl <= state.entry);
+        const tpInverted = state.tp > 0 && state.entry > 0 && (isBuy ? state.tp <= state.entry : state.tp >= state.entry);
+
         // 1. TradingView Long / Short Risk-Reward Shaded Box (TP/SL Tool)
         if (state.showTpSlBox && yEntry !== null) {
-          const boxLeft = Math.max(20, plotW * 0.25);
-          const boxWidth = Math.max(120, plotW * 0.68);
+          const boxLeft = Math.max(10, Math.round(plotW * (isCompact ? 0.14 : 0.24)));
+          const boxWidth = Math.max(60, Math.min(plotW - boxLeft - 6, Math.round(plotW * 0.72)));
 
           // Profit Zone (Entry -> TP)
           if (yTP !== null) {
             const topY = Math.min(yEntry, yTP);
             const boxH = Math.abs(yTP - yEntry);
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.14)';
+            ctx.fillStyle = tpInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(16, 185, 129, 0.14)';
             ctx.fillRect(boxLeft, topY, boxWidth, boxH);
-            ctx.strokeStyle = 'rgba(16, 185, 129, 0.45)';
+            ctx.strokeStyle = tpInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(16, 185, 129, 0.45)';
             ctx.lineWidth = 1;
             ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
           }
@@ -393,9 +500,9 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           if (ySL !== null) {
             const topY = Math.min(yEntry, ySL);
             const boxH = Math.abs(ySL - yEntry);
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+            ctx.fillStyle = slInverted ? 'rgba(245, 158, 11, 0.16)' : 'rgba(239, 68, 68, 0.15)';
             ctx.fillRect(boxLeft, topY, boxWidth, boxH);
-            ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+            ctx.strokeStyle = slInverted ? 'rgba(245, 158, 11, 0.55)' : 'rgba(239, 68, 68, 0.45)';
             ctx.lineWidth = 1;
             ctx.strokeRect(boxLeft, topY, boxWidth, boxH);
           }
@@ -414,7 +521,12 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.lineTo(plotW, y);
           ctx.stroke();
           ctx.restore();
-          drawPill(8, y, '━ SR ₹' + hl.price.toFixed(1), 'rgba(250, 204, 21, 0.9)', '#0F172A');
+          drawPill(6, y, '━ SR ₹' + hl.price.toFixed(1), 'rgba(250, 204, 21, 0.9)', '#0F172A', null, {
+            compact: isCompact,
+            align: 'left',
+            minX: 6,
+            maxX: pillRightEdge,
+          });
         });
 
         // 3. Custom Diagonal Trendlines
@@ -478,27 +590,41 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             const sideLbl = state.activePosition.netQty > 0 ? 'LONG' : 'SHORT';
             const pnlStr = (state.activePosition.pnl >= 0 ? '+₹' : '-₹') + Math.abs(Math.round(state.activePosition.pnl));
             drawPill(
-              8,
+              6,
               yPos,
               '⚡ ' + sideLbl + ' ' + Math.abs(state.activePosition.netQty) + ' @ ₹' + state.activePosition.avgPrice.toFixed(1) + ' (' + pnlStr + ')',
               '#F59E0B',
-              '#0F172A'
+              '#0F172A',
+              null,
+              {
+                compact: isCompact,
+                align: 'left',
+                minX: 6,
+                maxX: pillRightEdge,
+              }
             );
           }
         }
 
-        // 5. Draggable TP, ENTRY, SL Lines & Interactive Handles
-        const slPts = state.sl > 0 ? Math.abs(state.entry - state.sl) : 0;
-        const tpPts = state.tp > 0 ? Math.abs(state.tp - state.entry) : 0;
+        // 5. Draggable TP, ENTRY, SL Lines & Interactive Handles (draw dragged handle last for top z-order)
+        const slPts = state.sl > 0 && !slInverted ? Math.abs(state.entry - state.sl) : 0;
+        const tpPts = state.tp > 0 && !tpInverted ? Math.abs(state.tp - state.entry) : 0;
         const riskRs = Math.round(slPts * state.totalQty);
         const rewardRs = Math.round(tpPts * state.totalQty);
-        const rrStr = slPts > 0 ? (tpPts / slPts).toFixed(2) : '-';
+        const rrStr = slPts > 0 && tpPts > 0 ? (tpPts / slPts).toFixed(2) : '-';
 
-        // TP Line
-        if (yTP !== null) {
+        const pillOpts = {
+          compact: isCompact,
+          align: 'right',
+          minX: 6,
+          maxX: pillRightEdge,
+        };
+
+        const renderTP = () => {
+          if (yTP === null) return;
           ctx.save();
-          ctx.strokeStyle = '#10B981';
-          ctx.lineWidth = draggingTarget?.type === 'TP' ? 3 : 2;
+          ctx.strokeStyle = tpInverted ? '#F59E0B' : '#10B981';
+          ctx.lineWidth = draggingTarget && draggingTarget.type === 'TP' ? 3 : 2;
           ctx.setLineDash([5, 3]);
           ctx.beginPath();
           ctx.moveTo(0, yTP);
@@ -506,15 +632,32 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.stroke();
           ctx.restore();
 
-          const tpLabel = '☰ TP ₹' + state.tp.toFixed(1) + '  +₹' + rewardRs + ' (1:' + rrStr + ')';
-          drawPill(Math.max(10, plotW - 190), yTP, tpLabel, '#10B981', '#06281E', '#6EE7B7');
-        }
+          let tpLabel;
+          if (tpInverted) {
+            const cmp = isBuy ? (state.tp < state.entry ? '<' : '=') : (state.tp > state.entry ? '>' : '=');
+            tpLabel = '☰ ⚠️ TP ' + cmp + ' ENTRY ₹' + state.tp.toFixed(1);
+          } else if (isCompact) {
+            tpLabel = '☰ TP ₹' + state.tp.toFixed(1) + ' +₹' + rewardRs + (rrStr !== '-' ? ' (1:' + rrStr + ')' : '');
+          } else {
+            tpLabel = '☰ TP ₹' + state.tp.toFixed(1) + '  +₹' + rewardRs + ' (1:' + rrStr + ')';
+          }
 
-        // ENTRY Line
-        if (yEntry !== null) {
+          drawPill(
+            pillRightEdge,
+            yTP,
+            tpLabel,
+            tpInverted ? '#F59E0B' : '#10B981',
+            tpInverted ? '#0F172A' : '#06281E',
+            tpInverted ? '#FEF08A' : '#6EE7B7',
+            pillOpts
+          );
+        };
+
+        const renderEntry = () => {
+          if (yEntry === null) return;
           ctx.save();
           ctx.strokeStyle = '#38BDF8';
-          ctx.lineWidth = draggingTarget?.type === 'ENTRY' ? 3 : 2;
+          ctx.lineWidth = draggingTarget && draggingTarget.type === 'ENTRY' ? 3 : 2;
           ctx.beginPath();
           ctx.moveTo(0, yEntry);
           ctx.lineTo(plotW, yEntry);
@@ -522,14 +665,14 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.restore();
 
           const entryLabel = '☰ ' + state.side + ' ENTRY ₹' + state.entry.toFixed(1);
-          drawPill(Math.max(10, plotW - 155), yEntry, entryLabel, '#0284C7', '#FFFFFF', '#7DD3FC');
-        }
+          drawPill(pillRightEdge, yEntry, entryLabel, '#0284C7', '#FFFFFF', '#7DD3FC', pillOpts);
+        };
 
-        // SL Line
-        if (ySL !== null) {
+        const renderSL = () => {
+          if (ySL === null) return;
           ctx.save();
-          ctx.strokeStyle = '#EF4444';
-          ctx.lineWidth = draggingTarget?.type === 'SL' ? 3 : 2;
+          ctx.strokeStyle = slInverted ? '#F59E0B' : '#EF4444';
+          ctx.lineWidth = draggingTarget && draggingTarget.type === 'SL' ? 3 : 2;
           ctx.setLineDash([5, 3]);
           ctx.beginPath();
           ctx.moveTo(0, ySL);
@@ -537,9 +680,36 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.stroke();
           ctx.restore();
 
-          const slLabel = '☰ SL ₹' + state.sl.toFixed(1) + '  -₹' + riskRs;
-          drawPill(Math.max(10, plotW - 155), ySL, slLabel, '#DC2626', '#FFFFFF', '#FCA5A5');
+          let slLabel;
+          if (slInverted) {
+            const cmp = isBuy ? (state.sl > state.entry ? '>' : '=') : (state.sl < state.entry ? '<' : '=');
+            slLabel = '☰ ⚠️ SL ' + cmp + ' ENTRY ₹' + state.sl.toFixed(1);
+          } else {
+            slLabel = '☰ SL ₹' + state.sl.toFixed(1) + (isCompact ? ' -₹' : '  -₹') + riskRs;
+          }
+
+          drawPill(
+            pillRightEdge,
+            ySL,
+            slLabel,
+            slInverted ? '#F59E0B' : '#DC2626',
+            slInverted ? '#0F172A' : '#FFFFFF',
+            slInverted ? '#FEF08A' : '#FCA5A5',
+            pillOpts
+          );
+        };
+
+        const activeDragType = draggingTarget ? draggingTarget.type : null;
+        const drawOrder = ['TP', 'ENTRY', 'SL'];
+        if (activeDragType && drawOrder.indexOf(activeDragType) !== -1) {
+          drawOrder.splice(drawOrder.indexOf(activeDragType), 1);
+          drawOrder.push(activeDragType);
         }
+        drawOrder.forEach((key) => {
+          if (key === 'TP') renderTP();
+          else if (key === 'ENTRY') renderEntry();
+          else if (key === 'SL') renderSL();
+        });
       }
 
       // Hit-test near a horizontal level (16px tolerance for comfortable finger/mouse grabbing)
@@ -581,11 +751,15 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         const pos = getCoords(e);
         pointerPos = pos;
 
+        // Allow native price-axis vertical scaling on the right axis without grabbing lines
+        if (pos.x > getPlotWidth()) return;
+
         // Drawing mode: HLINE
         if (state.tool === 'HLINE') {
           const price = candleSeries.coordinateToPrice(pos.y);
           if (price) {
             state.hLines.push({ id: Date.now(), price: roundTick(price) });
+            state.drawingHistory.push('HLINE');
             sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
             drawOverlay();
           }
@@ -607,6 +781,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 p1: state.pendingTrendStart,
                 p2: { time, price: roundTick(price) },
               });
+              state.drawingHistory.push('TRENDLINE');
               state.pendingTrendStart = null;
               hintPill.textContent = '╱ Trendline added! Tap again to draw another';
               sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
@@ -646,6 +821,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
         if (!draggingTarget) {
           // Hover cursor feedback on desktop
+          if (pos.x > getPlotWidth()) {
+            container.style.cursor = 'ns-resize';
+            return;
+          }
           const hit = hitTestLine(pos.y);
           container.style.cursor = hit ? 'ns-resize' : (state.tool === 'HLINE' || state.tool === 'TRENDLINE' ? 'crosshair' : 'default');
           if (state.tool === 'TRENDLINE' && state.pendingTrendStart) {
@@ -739,10 +918,30 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             btnQuickBuy.textContent = 'BUY ₹' + state.entry.toFixed(1);
             btnQuickSell.textContent = 'SELL ₹' + state.entry.toFixed(1);
             drawOverlay();
+          } else if (data.type === 'UNDO_DRAWING') {
+            if (state.pendingTrendStart) {
+              state.pendingTrendStart = null;
+              hintPill.textContent = '╱ Tap start point, then end point for Trendline';
+            } else if (state.drawingHistory.length > 0) {
+              const lastType = state.drawingHistory.pop();
+              if (lastType === 'HLINE') {
+                state.hLines.pop();
+              } else if (lastType === 'TRENDLINE') {
+                state.trendLines.pop();
+              }
+            } else if (state.trendLines.length > 0) {
+              state.trendLines.pop();
+            } else if (state.hLines.length > 0) {
+              state.hLines.pop();
+            }
+            sendToHost({ type: 'DRAWING_COUNT', count: state.hLines.length + state.trendLines.length });
+            drawOverlay();
           } else if (data.type === 'CLEAR_DRAWINGS') {
             state.hLines = [];
             state.trendLines = [];
+            state.drawingHistory = [];
             state.pendingTrendStart = null;
+            sendToHost({ type: 'DRAWING_COUNT', count: 0 });
             drawOverlay();
           }
         } catch {}
@@ -758,19 +957,24 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         resizeCanvas();
       });
 
+      btnQuickBuy.textContent = 'BUY ₹' + state.entry.toFixed(1);
+      btnQuickSell.textContent = 'SELL ₹' + state.entry.toFixed(1);
       resizeCanvas();
+      sendToHost({ type: 'CHART_READY' });
     </script>
   </body>
 </html>`;
   }, [candles, symbol, showVWAP, showEMA9]);
 
   // Process incoming messages from chart (drags, quick buy/sell, exits, drawings)
-  const processChartEvent = (raw: any) => {
+  const processChartEvent = useCallback((raw: any) => {
     try {
       const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
       if (!data || !data.type) return;
 
-      if (data.type === 'LEVEL_DRAGGED') {
+      if (data.type === 'CHART_READY') {
+        syncStateToChart();
+      } else if (data.type === 'LEVEL_DRAGGED') {
         if (onLevelChange) {
           onLevelChange(data.line, data.price);
         } else if (onPriceSelected) {
@@ -784,7 +988,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         setDrawingCount(data.count || 0);
       }
     } catch {}
-  };
+  }, [syncStateToChart, onLevelChange, onPriceSelected, onQuickOrder, activePosition, onQuickExitPosition]);
 
   // Listen for web iframe messages
   useEffect(() => {
@@ -795,7 +999,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       window.addEventListener('message', handleWebMessage);
       return () => window.removeEventListener('message', handleWebMessage);
     }
-  }, [onLevelChange, onQuickOrder, onQuickExitPosition, activePosition, onPriceSelected]);
+  }, [processChartEvent]);
 
   const handleWebViewMessage = (event: any) => {
     processChartEvent(event.nativeEvent.data);
@@ -846,62 +1050,102 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       </View>
 
       {/* Row 2: Pro Drawing & TP/SL Tools Bar */}
-      <View style={styles.drawingBar}>
-        <TouchableOpacity
-          style={[styles.toolBtn, activeTool === 'DRAG' && styles.toolBtnActive]}
-          onPress={() => setActiveTool('DRAG')}
+      <View style={styles.drawingBarWrap}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.drawingBarContent}
         >
-          <Text style={[styles.toolBtnText, activeTool === 'DRAG' && styles.toolBtnTextActive]}>
-            ✋ Drag
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[
-            styles.toolBtn,
-            showTpSlBox && styles.toolBtnBoxActive,
-          ]}
-          onPress={() => {
-            setShowTpSlBox(!showTpSlBox);
-            setActiveTool('TPSL');
-          }}
-        >
-          <Text
-            style={[
-              styles.toolBtnText,
-              showTpSlBox && { color: '#10B981' },
-            ]}
+          <TouchableOpacity
+            style={[styles.toolBtn, activeTool === 'DRAG' && styles.toolBtnActive]}
+            onPress={() => setActiveTool('DRAG')}
           >
-            📐 TP/SL {showTpSlBox ? 'ON' : 'OFF'}
-          </Text>
-        </TouchableOpacity>
+            <Text
+              numberOfLines={1}
+              style={[styles.toolBtnText, activeTool === 'DRAG' && styles.toolBtnTextActive]}
+            >
+              ✋ Drag
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.toolBtn, activeTool === 'HLINE' && styles.toolBtnActive]}
-          onPress={() => setActiveTool(activeTool === 'HLINE' ? 'DRAG' : 'HLINE')}
-        >
-          <Text style={[styles.toolBtnText, activeTool === 'HLINE' && styles.toolBtnTextActive]}>
-            ━ H-Line
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              showTpSlBox && styles.toolBtnBoxActive,
+            ]}
+            onPress={() => {
+              setShowTpSlBox(!showTpSlBox);
+              setActiveTool('TPSL');
+            }}
+          >
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.toolBtnText,
+                showTpSlBox && { color: '#10B981' },
+              ]}
+            >
+              📐 TP/SL {showTpSlBox ? 'ON' : 'OFF'}
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.toolBtn, activeTool === 'TRENDLINE' && styles.toolBtnActive]}
-          onPress={() => setActiveTool(activeTool === 'TRENDLINE' ? 'DRAG' : 'TRENDLINE')}
-        >
-          <Text style={[styles.toolBtnText, activeTool === 'TRENDLINE' && styles.toolBtnTextActive]}>
-            ╱ Trend
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.toolBtn, activeTool === 'HLINE' && styles.toolBtnActive]}
+            onPress={() => setActiveTool(activeTool === 'HLINE' ? 'DRAG' : 'HLINE')}
+          >
+            <Text
+              numberOfLines={1}
+              style={[styles.toolBtnText, activeTool === 'HLINE' && styles.toolBtnTextActive]}
+            >
+              ━ H-Line
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.toolBtn, drawingCount > 0 && styles.clearBtnActive]}
-          onPress={handleClearDrawings}
-        >
-          <Text style={[styles.toolBtnText, drawingCount > 0 && { color: '#F87171' }]}>
-            🗑️{drawingCount > 0 ? ` (${drawingCount})` : ''}
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.toolBtn, activeTool === 'TRENDLINE' && styles.toolBtnActive]}
+            onPress={() => setActiveTool(activeTool === 'TRENDLINE' ? 'DRAG' : 'TRENDLINE')}
+          >
+            <Text
+              numberOfLines={1}
+              style={[styles.toolBtnText, activeTool === 'TRENDLINE' && styles.toolBtnTextActive]}
+            >
+              ╱ Trend
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              drawingCount > 0 ? styles.undoBtnActive : styles.toolBtnMuted,
+            ]}
+            onPress={handleUndoDrawing}
+          >
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.toolBtnText,
+                drawingCount > 0 && { color: '#FBBF24' },
+              ]}
+            >
+              ↩️ Undo
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              drawingCount > 0 ? styles.clearBtnActive : styles.toolBtnMuted,
+            ]}
+            onPress={handleClearDrawings}
+          >
+            <Text
+              numberOfLines={1}
+              style={[styles.toolBtnText, drawingCount > 0 && { color: '#F87171' }]}
+            >
+              🗑️ Clear{drawingCount > 0 ? ` (${drawingCount})` : ''}
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
       </View>
 
       {/* Main Chart Area */}
@@ -939,17 +1183,41 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </View>
         {stopLossPrice && stopLossPrice > 0 ? (
           <View style={styles.legendItem}>
-            <View style={[styles.dot, { backgroundColor: '#EF4444' }]} />
-            <Text style={[styles.legendText, { color: '#F87171' }]}>
-              SL: ₹{stopLossPrice.toFixed(1)} (-₹{Math.round(slRiskRupees)})
+            <View
+              style={[
+                styles.dot,
+                { backgroundColor: isSlInverted ? '#F59E0B' : '#EF4444' },
+              ]}
+            />
+            <Text
+              style={[
+                styles.legendText,
+                { color: isSlInverted ? '#FBBF24' : '#F87171' },
+              ]}
+            >
+              {isSlInverted
+                ? `⚠️ SL ${transactionType === 'BUY' ? (stopLossPrice > entryPrice ? '>' : '=') : (stopLossPrice < entryPrice ? '<' : '=')} ENTRY (₹${stopLossPrice.toFixed(1)})`
+                : `SL: ₹${stopLossPrice.toFixed(1)} (-₹${Math.round(slRiskRupees)})`}
             </Text>
           </View>
         ) : null}
         {targetPrice && targetPrice > 0 ? (
           <View style={styles.legendItem}>
-            <View style={[styles.dot, { backgroundColor: '#10B981' }]} />
-            <Text style={[styles.legendText, { color: '#34D399' }]}>
-              TP: ₹{targetPrice.toFixed(1)} (+₹{Math.round(tpRewardRupees)} | 1:{rrRatio})
+            <View
+              style={[
+                styles.dot,
+                { backgroundColor: isTpInverted ? '#F59E0B' : '#10B981' },
+              ]}
+            />
+            <Text
+              style={[
+                styles.legendText,
+                { color: isTpInverted ? '#FBBF24' : '#34D399' },
+              ]}
+            >
+              {isTpInverted
+                ? `⚠️ TP ${transactionType === 'BUY' ? (targetPrice < entryPrice ? '<' : '=') : (targetPrice > entryPrice ? '>' : '=')} ENTRY (₹${targetPrice.toFixed(1)})`
+                : `TP: ₹${targetPrice.toFixed(1)} (+₹${Math.round(tpRewardRupees)}${rrRatio !== '-' ? ` | 1:${rrRatio}` : ''})`}
             </Text>
           </View>
         ) : null}
@@ -1020,26 +1288,31 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '700',
   },
-  drawingBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
+  drawingBarWrap: {
     backgroundColor: '#0B1120',
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
+    flexGrow: 0,
+  },
+  drawingBarContent: {
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6,
+    paddingVertical: 5,
     gap: 4,
   },
   toolBtn: {
-    flex: 1,
+    flexGrow: 1,
     paddingVertical: 4,
-    paddingHorizontal: 4,
+    paddingHorizontal: 7,
     borderRadius: 5,
     backgroundColor: '#1E293B',
     borderWidth: 1,
     borderColor: '#334155',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   toolBtnActive: {
     backgroundColor: 'rgba(56, 189, 248, 0.18)',
@@ -1049,9 +1322,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(16, 185, 129, 0.14)',
     borderColor: '#10B981',
   },
+  undoBtnActive: {
+    borderColor: '#F59E0B',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+  },
   clearBtnActive: {
     borderColor: '#EF4444',
     backgroundColor: 'rgba(239, 68, 68, 0.12)',
+  },
+  toolBtnMuted: {
+    opacity: 0.65,
   },
   toolBtnText: {
     color: '#94A3B8',
@@ -1067,11 +1347,13 @@ const styles = StyleSheet.create({
   },
   legendContainer: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-around',
     backgroundColor: '#1E293B',
-    paddingVertical: 6,
+    paddingVertical: 5,
     paddingHorizontal: 8,
+    gap: 6,
     borderTopWidth: 1,
     borderTopColor: '#334155',
   },

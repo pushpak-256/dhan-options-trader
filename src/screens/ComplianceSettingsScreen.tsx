@@ -9,23 +9,152 @@ import {
   TouchableOpacity,
   Alert,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StorageService } from '../services/storage';
+import { AutoSquareOffEngine, WatchdogStatus } from '../services/autoSquareOffEngine';
 import { ComplianceRulesConfig, ComplianceState } from '../types/compliance';
+
+const CUSTOM_RULES_STORAGE_KEY = 'custom_trader_rules_v1';
+
+export interface CustomTraderRule {
+  id: string;
+  text: string;
+  active: boolean;
+  createdAt: number;
+}
+
+const DEFAULT_CUSTOM_RULES: CustomTraderRule[] = [
+  {
+    id: 'starter_vwap_ema9',
+    text: 'Only enter on pullback to VWAP/EMA9',
+    active: true,
+    createdAt: 1,
+  },
+  {
+    id: 'starter_no_avg_down',
+    text: 'No averaging down losing options',
+    active: true,
+    createdAt: 2,
+  },
+  {
+    id: 'starter_candle_close',
+    text: 'Wait for candle close confirmation before entry',
+    active: true,
+    createdAt: 3,
+  },
+];
+
+function formatHeartbeatTime(timestamp: number | null): string {
+  if (!timestamp) return 'Waiting...';
+  try {
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  } catch {
+    return new Date(timestamp).toISOString().slice(11, 19);
+  }
+}
 
 export const ComplianceSettingsScreen: React.FC = () => {
   const [config, setConfig] = useState<ComplianceRulesConfig | null>(null);
   const [state, setState] = useState<ComplianceState | null>(null);
   const [savedMessage, setSavedMessage] = useState(false);
 
+  const [customRules, setCustomRules] = useState<CustomTraderRule[]>([]);
+  const [newRuleText, setNewRuleText] = useState('');
+  const [watchdogStatus, setWatchdogStatus] = useState<WatchdogStatus>(() =>
+    AutoSquareOffEngine.getLastStatus()
+  );
+
   useEffect(() => {
     loadData();
+
+    const heartbeatInterval = setInterval(() => {
+      setWatchdogStatus(AutoSquareOffEngine.getLastStatus());
+    }, 2000);
+
+    return () => clearInterval(heartbeatInterval);
   }, []);
 
   const loadData = async () => {
-    const loadedConfig = await StorageService.getComplianceConfig();
-    const loadedState = await StorageService.getComplianceState();
+    const [loadedConfig, loadedState, loadedCustomRules] = await Promise.all([
+      StorageService.getComplianceConfig(),
+      StorageService.getComplianceState(),
+      loadCustomRules(),
+    ]);
     setConfig(loadedConfig);
     setState(loadedState);
+    setCustomRules(loadedCustomRules);
+    setWatchdogStatus(AutoSquareOffEngine.getLastStatus());
+  };
+
+  const loadCustomRules = async (): Promise<CustomTraderRule[]> => {
+    try {
+      const raw = await AsyncStorage.getItem(CUSTOM_RULES_STORAGE_KEY);
+      if (raw === null) {
+        await AsyncStorage.setItem(
+          CUSTOM_RULES_STORAGE_KEY,
+          JSON.stringify(DEFAULT_CUSTOM_RULES)
+        );
+        return DEFAULT_CUSTOM_RULES;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (item): item is CustomTraderRule =>
+            item &&
+            typeof item.id === 'string' &&
+            typeof item.text === 'string' &&
+            typeof item.active === 'boolean'
+        );
+      }
+      return DEFAULT_CUSTOM_RULES;
+    } catch {
+      return DEFAULT_CUSTOM_RULES;
+    }
+  };
+
+  const persistCustomRules = async (nextRules: CustomTraderRule[]) => {
+    setCustomRules(nextRules);
+    try {
+      await AsyncStorage.setItem(CUSTOM_RULES_STORAGE_KEY, JSON.stringify(nextRules));
+    } catch (err) {
+      console.warn('Failed to persist custom trader rules:', err);
+    }
+  };
+
+  const handleAddCustomRule = async () => {
+    const trimmed = newRuleText.trim();
+    if (!trimmed) return;
+
+    const newRule: CustomTraderRule = {
+      id: `rule_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      text: trimmed,
+      active: true,
+      createdAt: Date.now(),
+    };
+
+    const nextRules = [newRule, ...customRules];
+    setNewRuleText('');
+    await persistCustomRules(nextRules);
+  };
+
+  const handleToggleCustomRule = async (id: string) => {
+    const nextRules = customRules.map((rule) =>
+      rule.id === id ? { ...rule, active: !rule.active } : rule
+    );
+    await persistCustomRules(nextRules);
+  };
+
+  const handleDeleteCustomRule = async (id: string) => {
+    const nextRules = customRules.filter((rule) => rule.id !== id);
+    await persistCustomRules(nextRules);
+  };
+
+  const handleRestoreStarterRules = async () => {
+    await persistCustomRules(DEFAULT_CUSTOM_RULES);
   };
 
   const handleSave = async () => {
@@ -65,6 +194,8 @@ export const ComplianceSettingsScreen: React.FC = () => {
   };
 
   if (!config || !state) return null;
+
+  const activeCustomRulesCount = customRules.filter((r) => r.active).length;
 
   return (
     <ScrollView style={styles.container}>
@@ -112,6 +243,23 @@ export const ComplianceSettingsScreen: React.FC = () => {
             {state.isDailyLossLocked ? 'LOCKED' : 'Unlocked'}
           </Text>
         </View>
+        <View style={styles.statusRow}>
+          <Text style={styles.statusLabel}>Auto-Exit Watchdog:</Text>
+          <Text
+            style={[
+              styles.statusValue,
+              watchdogStatus.lastError
+                ? styles.textAmber
+                : watchdogStatus.isMonitoring
+                  ? styles.textGreen
+                  : styles.textMuted,
+            ]}
+          >
+            {watchdogStatus.isMonitoring
+              ? `● Live (${formatHeartbeatTime(watchdogStatus.lastHeartbeatAt)})`
+              : '○ Standby'}
+          </Text>
+        </View>
 
         <TouchableOpacity style={styles.resetBtn} onPress={handleResetDay}>
           <Text style={styles.resetBtnText}>↺ Reset Today's Stats</Text>
@@ -123,7 +271,7 @@ export const ComplianceSettingsScreen: React.FC = () => {
         <Text style={styles.sectionHeader}>PERSONAL TRADING RULES</Text>
 
         {/* Rule 1: Max Daily Loss */}
-        <View style={styles.ruleCard}>
+        <View style={[styles.ruleCard, config.maxDailyLossEnabled && styles.killSwitchRuleCard]}>
           <View style={styles.ruleHeader}>
             <View style={styles.ruleTitleBox}>
               <Text style={styles.ruleTitle}>1. Max Daily Loss Hard-Stop</Text>
@@ -139,6 +287,42 @@ export const ComplianceSettingsScreen: React.FC = () => {
               thumbColor={config.maxDailyLossEnabled ? '#38BDF8' : '#64748B'}
             />
           </View>
+
+          {/* Auto-Exit Kill Switch Highlight Badge & Explanation */}
+          <View style={styles.killSwitchBox}>
+            <View style={styles.killSwitchBadgeRow}>
+              <View style={styles.killSwitchBadge}>
+                <Text style={styles.killSwitchBadgeText}>⚡ AUTO-EXIT KILL SWITCH</Text>
+              </View>
+              <View
+                style={[
+                  styles.killSwitchStatePill,
+                  config.maxDailyLossEnabled
+                    ? styles.killSwitchArmedPill
+                    : styles.killSwitchDisarmedPill,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.killSwitchStateText,
+                    config.maxDailyLossEnabled
+                      ? styles.killSwitchArmedText
+                      : styles.killSwitchDisarmedText,
+                  ]}
+                >
+                  {config.maxDailyLossEnabled ? 'ARMED' : 'OFF'}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.killSwitchExplain}>
+              ⚡ Auto-Exit Kill Switch: Automatically cancels all pending orders & squares off ALL open positions via Dhan API the instant Max Daily Loss is breached.
+            </Text>
+            <Text style={styles.killSwitchHeartbeat}>
+              Watchdog heartbeat: {formatHeartbeatTime(watchdogStatus.lastHeartbeatAt)}
+              {watchdogStatus.isMonitoring ? ' • Monitoring active' : ' • Not running'}
+            </Text>
+          </View>
+
           {config.maxDailyLossEnabled && (
             <View style={styles.inputRow}>
               <Text style={styles.inputPrefix}>Max Loss (₹):</Text>
@@ -342,6 +526,100 @@ export const ComplianceSettingsScreen: React.FC = () => {
           {savedMessage ? '✓ RULES SAVED' : 'SAVE RISK RULES'}
         </Text>
       </TouchableOpacity>
+
+      {/* Custom Trader Rules / Pre-Trade Checklist */}
+      <View style={styles.customSection}>
+        <View style={styles.customHeaderRow}>
+          <Text style={styles.sectionHeader}>CUSTOM TRADER RULES / PRE-TRADE CHECKLIST</Text>
+          <View style={styles.customCountPill}>
+            <Text style={styles.customCountText}>
+              {activeCustomRulesCount}/{customRules.length} Active
+            </Text>
+          </View>
+        </View>
+        <Text style={styles.customSubtext}>
+          Add your own playbook rules to review before every entry. Changes save automatically on this device.
+        </Text>
+
+        {/* Add Custom Rule Input */}
+        <View style={styles.addRuleRow}>
+          <TextInput
+            style={styles.addRuleInput}
+            placeholder="e.g. Only enter on pullback to VWAP/EMA9"
+            placeholderTextColor="#64748B"
+            value={newRuleText}
+            onChangeText={setNewRuleText}
+            onSubmitEditing={handleAddCustomRule}
+            returnKeyType="done"
+          />
+          <TouchableOpacity
+            style={[
+              styles.addRuleBtn,
+              !newRuleText.trim() && styles.addRuleBtnDisabled,
+            ]}
+            onPress={handleAddCustomRule}
+            disabled={!newRuleText.trim()}
+          >
+            <Text style={styles.addRuleBtnText}>+ Add Rule</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Custom Rules List */}
+        {customRules.length === 0 ? (
+          <View style={styles.emptyRulesCard}>
+            <Text style={styles.emptyRulesText}>
+              No custom rules yet. Add a personal discipline rule above or load starter rules.
+            </Text>
+            <TouchableOpacity
+              style={styles.restoreBtn}
+              onPress={handleRestoreStarterRules}
+            >
+              <Text style={styles.restoreBtnText}>↺ Restore Starter Rules</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          customRules.map((rule) => (
+            <View
+              key={rule.id}
+              style={[
+                styles.customRuleItem,
+                !rule.active && styles.customRuleItemInactive,
+              ]}
+            >
+              <Switch
+                value={rule.active}
+                onValueChange={() => handleToggleCustomRule(rule.id)}
+                thumbColor={rule.active ? '#10B981' : '#64748B'}
+              />
+              <TouchableOpacity
+                style={styles.customRuleTextWrap}
+                onPress={() => handleToggleCustomRule(rule.id)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.customRuleText,
+                    !rule.active && styles.customRuleTextInactive,
+                  ]}
+                >
+                  {rule.text}
+                </Text>
+                <Text style={styles.customRuleMeta}>
+                  {rule.active ? 'Active pre-trade check' : 'Paused'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.deleteRuleBtn}
+                onPress={() => handleDeleteCustomRule(rule.id)}
+                accessibilityLabel="Delete rule"
+              >
+                <Text style={styles.deleteRuleText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
+      </View>
+
       <View style={{ height: 40 }} />
     </ScrollView>
   );
@@ -401,6 +679,12 @@ const styles = StyleSheet.create({
   textRed: {
     color: '#EF4444',
   },
+  textAmber: {
+    color: '#F59E0B',
+  },
+  textMuted: {
+    color: '#64748B',
+  },
   resetBtn: {
     marginTop: 10,
     paddingVertical: 6,
@@ -431,6 +715,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
   },
+  killSwitchRuleCard: {
+    borderColor: '#DC2626',
+  },
   ruleHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -450,6 +737,69 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: 3,
     lineHeight: 16,
+  },
+  killSwitchBox: {
+    marginTop: 10,
+    backgroundColor: 'rgba(127, 29, 29, 0.35)',
+    borderWidth: 1,
+    borderColor: '#B91C1C',
+    borderRadius: 8,
+    padding: 10,
+  },
+  killSwitchBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  killSwitchBadge: {
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  killSwitchBadgeText: {
+    color: '#FEF2F2',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  killSwitchStatePill: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  killSwitchArmedPill: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderColor: '#10B981',
+  },
+  killSwitchDisarmedPill: {
+    backgroundColor: 'rgba(100, 116, 139, 0.2)',
+    borderColor: '#64748B',
+  },
+  killSwitchStateText: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  killSwitchArmedText: {
+    color: '#34D399',
+  },
+  killSwitchDisarmedText: {
+    color: '#94A3B8',
+  },
+  killSwitchExplain: {
+    color: '#FECACA',
+    fontSize: 11,
+    fontWeight: '600',
+    lineHeight: 16,
+  },
+  killSwitchHeartbeat: {
+    color: '#FCA5A5',
+    fontSize: 10,
+    marginTop: 6,
+    opacity: 0.85,
   },
   inputRow: {
     flexDirection: 'row',
@@ -489,5 +839,141 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 14,
     letterSpacing: 0.5,
+  },
+  customSection: {
+    marginTop: 22,
+  },
+  customHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  customCountPill: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  customCountText: {
+    color: '#38BDF8',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  customSubtext: {
+    color: '#94A3B8',
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 10,
+  },
+  addRuleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  addRuleInput: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    color: '#F8FAFC',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#475569',
+    fontSize: 12,
+  },
+  addRuleBtn: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addRuleBtnDisabled: {
+    backgroundColor: '#334155',
+    opacity: 0.7,
+  },
+  addRuleBtnText: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  emptyRulesCard: {
+    backgroundColor: '#1E293B',
+    borderRadius: 10,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+  },
+  emptyRulesText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  restoreBtn: {
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#334155',
+    borderRadius: 6,
+  },
+  restoreBtnText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  customRuleItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E293B',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    gap: 10,
+  },
+  customRuleItemInactive: {
+    opacity: 0.65,
+    borderColor: '#1E293B',
+  },
+  customRuleTextWrap: {
+    flex: 1,
+  },
+  customRuleText: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 17,
+  },
+  customRuleTextInactive: {
+    color: '#94A3B8',
+    textDecorationLine: 'line-through',
+  },
+  customRuleMeta: {
+    color: '#64748B',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  deleteRuleBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+  },
+  deleteRuleText: {
+    color: '#F87171',
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

@@ -2,6 +2,8 @@ name: Build & Release Android APK
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -19,7 +21,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '20'
           cache: npm
 
       - name: Setup Java (JDK 17)
@@ -43,47 +45,89 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Verify Signed Release APK
+      - name: Verify & Sign APK
         run: |
           APK_DIR="android/app/build/outputs/apk/release"
           ls -lh "$APK_DIR"
           if [ -f "$APK_DIR/app-release.apk" ]; then
-            echo "Found signed APK: $APK_DIR/app-release.apk"
+            echo "✅ Found signed APK: $APK_DIR/app-release.apk"
+            cp "$APK_DIR/app-release.apk" dhan-options-trader.apk
           elif [ -f "$APK_DIR/app-release-unsigned.apk" ]; then
-            echo "Unsigned APK found; signing with debug keystore for installability..."
+            echo "⚠️ Unsigned APK found; signing with debug keystore..."
             APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
             KEYSTORE="android/app/debug.keystore"
             if [ ! -f "$KEYSTORE" ]; then
-              keytool -genkey -v -keystore "$KEYSTORE" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+              keytool -genkey -v -keystore "$KEYSTORE" -storepass android \
+                -alias androiddebugkey -keypass android -keyalg RSA \
+                -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
             fi
-            "$APKSIGNER" sign --ks "$KEYSTORE" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --out "$APK_DIR/app-release.apk" "$APK_DIR/app-release-unsigned.apk"
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE" --ks-key-alias androiddebugkey \
+              --ks-pass pass:android --key-pass pass:android \
+              --out dhan-options-trader.apk \
+              "$APK_DIR/app-release-unsigned.apk"
           else
-            echo "ERROR: No release APK produced!"
+            echo "❌ ERROR: No release APK produced!"
             exit 1
           fi
-          ls -lh "$APK_DIR/app-release.apk"
+          ls -lh dhan-options-trader.apk
 
       - name: Determine Release Tag
         id: vars
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            TAG="${GITHUB_REF#refs/tags/}"
           else
-            echo "TAG_NAME=v1.0.0-$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+            TAG="v$(date +'%Y.%m.%d-%H%M')"
           fi
+          echo "TAG_NAME=$TAG" >> $GITHUB_OUTPUT
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date +'%d %b %Y %H:%M UTC')" >> $GITHUB_OUTPUT
+
+      - name: Get Commit Message
+        id: commit
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          echo "MESSAGE=$MSG" >> $GITHUB_OUTPUT
 
       - name: Publish GitHub Release & Upload APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.TAG_NAME }}
-          name: Dhan Options Trader ${{ steps.vars.outputs.TAG_NAME }}
+          name: "🚀 Dhan Options Trader ${{ steps.vars.outputs.TAG_NAME }}"
           body: |
-            ## Dhan Options Trader Update
-            - Visual on-chart order placement with draggable SL and Target lines
-            - Live Option Chains for NIFTY, BANKNIFTY, SENSEX
-            - Customizable psychology guardrails (Max daily loss, lot cap, cooldown)
-            - Seamless in-app auto-update
+            ## 📱 Dhan Options Trader — ${{ steps.vars.outputs.TAG_NAME }}
+
+            **Built:** ${{ steps.vars.outputs.BUILD_DATE }} · **Commit:** `${{ steps.vars.outputs.SHORT_SHA }}`
+            **Change:** ${{ steps.commit.outputs.MESSAGE }}
+
+            ---
+
+            ## ⬇️ Install on Android (2 steps)
+
+            1. **[Download APK ⬇️](https://github.com/pushpak-256/dhan-options-trader/releases/latest/download/dhan-options-trader.apk)**
+            2. Open the downloaded file on your Android phone → tap **Install**
+               *(Allow "Install from unknown sources" if prompted in Settings)*
+
+            ---
+
+            ## 🍎 Install on iPhone / iPad (PWA)
+
+            1. Open **[https://pushpak-256.github.io/dhan-options-trader/](https://pushpak-256.github.io/dhan-options-trader/)** in Safari
+            2. Tap the **Share** button (box with arrow) → **"Add to Home Screen"**
+            3. Tap **Add** — done! Works like a native app 🎉
+
+            ---
+
+            ## ✨ What's In This Build
+            - 📊 Visual on-chart order placement with draggable Entry / SL / TP lines
+            - 🔗 Live Option Chains for NIFTY, BANKNIFTY, SENSEX via DhanHQ API v2
+            - 🛡️ Psychology guardrails (Max daily loss, lot cap, revenge-trade cooldown)
+            - 🔄 Auto-update checker built in
           files: |
-            android/app/build/outputs/apk/release/app-release.apk
+            dhan-options-trader.apk
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

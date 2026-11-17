@@ -24,6 +24,12 @@ interface ChartOrderPanelProps {
   isSubmitting: boolean;
 }
 
+const RR_PRESETS = [
+  { label: '1:1.5', multiplier: 1.5 },
+  { label: '1:2', multiplier: 2 },
+  { label: '1:3', multiplier: 3 },
+] as const;
+
 export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
   transactionType,
   setTransactionType,
@@ -47,17 +53,55 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
   const totalQty = lots * lotSize;
   const estimatedCapital = (entryPrice * totalQty).toFixed(0);
 
-  const slRiskPts = stopLossPrice ? Math.abs(entryPrice - stopLossPrice) : 0;
+  const isSlValid =
+    !!stopLossPrice &&
+    stopLossPrice > 0 &&
+    (transactionType === 'BUY'
+      ? stopLossPrice < entryPrice
+      : stopLossPrice > entryPrice);
+
+  const isSlInverted = !!stopLossPrice && stopLossPrice > 0 && !isSlValid;
+
+  const isTpValid =
+    !!targetPrice &&
+    targetPrice > 0 &&
+    (transactionType === 'BUY'
+      ? targetPrice > entryPrice
+      : targetPrice < entryPrice);
+
+  const isTpInverted = !!targetPrice && targetPrice > 0 && !isTpValid;
+
+  const slRiskPts = isSlValid && stopLossPrice ? Math.abs(entryPrice - stopLossPrice) : 0;
   const totalRisk = Math.round(slRiskPts * totalQty);
 
-  const tpRewardPts = targetPrice ? Math.abs(targetPrice - entryPrice) : 0;
+  const tpRewardPts = isTpValid && targetPrice ? Math.abs(targetPrice - entryPrice) : 0;
   const totalReward = Math.round(tpRewardPts * totalQty);
 
-  const rrRatio = slRiskPts > 0 ? (tpRewardPts / slRiskPts).toFixed(2) : '-';
+  const numericRR = slRiskPts > 0 && tpRewardPts > 0 ? tpRewardPts / slRiskPts : 0;
+  const rrRatio = numericRR > 0 ? numericRR.toFixed(2) : '-';
+
+  const isMarketOrder = orderType === 'MARKET';
+
+  const handleSnapRR = (multiplier: number) => {
+    if (!isSlValid || !stopLossPrice) return;
+    const riskPts = Math.abs(entryPrice - stopLossPrice);
+    if (riskPts <= 0) return;
+
+    const rawTarget =
+      transactionType === 'BUY'
+        ? entryPrice + riskPts * multiplier
+        : entryPrice - riskPts * multiplier;
+
+    const snappedTarget = Number(
+      Math.max(0.05, Math.round(rawTarget * 20) / 20).toFixed(2)
+    );
+    setTargetPrice(snappedTarget);
+    setActiveLineType('TP');
+  };
 
   return (
     <View style={styles.container}>
-      {/* Top Row: Buy/Sell and Order Type */}
+      {/* Row 1: Buy/Sell and Lots Counter */}
       <View style={styles.row}>
         <View style={styles.segmentedControl}>
           <TouchableOpacity
@@ -118,6 +162,75 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         </View>
       </View>
 
+      {/* Row 2: Order Type (LIMIT / MKT) & Quick R:R Target Snap Presets */}
+      <View style={styles.controlsRow}>
+        <View style={styles.orderTypeToggle}>
+          <TouchableOpacity
+            style={[
+              styles.orderTypePill,
+              !isMarketOrder && styles.orderTypePillActive,
+            ]}
+            onPress={() => setOrderType('LIMIT')}
+          >
+            <Text
+              style={[
+                styles.orderTypeText,
+                !isMarketOrder && styles.orderTypeTextActive,
+              ]}
+            >
+              LIMIT
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.orderTypePill,
+              isMarketOrder && styles.orderTypePillActive,
+            ]}
+            onPress={() => setOrderType('MARKET')}
+          >
+            <Text
+              style={[
+                styles.orderTypeText,
+                isMarketOrder && styles.orderTypeTextActive,
+              ]}
+            >
+              MKT
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.rrPresetsGroup}>
+          <Text style={styles.rrGroupLabel}>R:R</Text>
+          {RR_PRESETS.map((preset) => {
+            const isMatched =
+              isSlValid &&
+              isTpValid &&
+              Math.abs(numericRR - preset.multiplier) < 0.06;
+            return (
+              <TouchableOpacity
+                key={preset.label}
+                style={[
+                  styles.rrPresetPill,
+                  isMatched && styles.rrPresetPillActive,
+                  !isSlValid && styles.rrPresetPillDisabled,
+                ]}
+                onPress={() => handleSnapRR(preset.multiplier)}
+                disabled={!isSlValid}
+              >
+                <Text
+                  style={[
+                    styles.rrPresetText,
+                    isMatched && styles.rrPresetTextActive,
+                  ]}
+                >
+                  {preset.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
       {/* Level Selection Tabs (Tap on Chart mode) */}
       <View style={styles.levelTabsRow}>
         <TouchableOpacity
@@ -127,7 +240,9 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
           ]}
           onPress={() => setActiveLineType('ENTRY')}
         >
-          <Text style={styles.levelTabLabel}>Entry</Text>
+          <Text style={styles.levelTabLabel}>
+            Entry ({isMarketOrder ? 'MKT' : 'LMT'})
+          </Text>
           <Text style={styles.levelTabValue}>₹{entryPrice.toFixed(1)}</Text>
         </TouchableOpacity>
 
@@ -135,11 +250,24 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
           style={[
             styles.levelTab,
             activeLineType === 'SL' && styles.slActiveTab,
+            isSlInverted && styles.invalidLevelTab,
           ]}
           onPress={() => setActiveLineType('SL')}
         >
-          <Text style={[styles.levelTabLabel, { color: '#F87171' }]}>Stop Loss</Text>
-          <Text style={[styles.levelTabValue, { color: '#EF4444' }]}>
+          <Text
+            style={[
+              styles.levelTabLabel,
+              { color: isSlInverted ? '#FBBF24' : '#F87171' },
+            ]}
+          >
+            {isSlInverted ? '⚠️ Stop Loss' : 'Stop Loss'}
+          </Text>
+          <Text
+            style={[
+              styles.levelTabValue,
+              { color: isSlInverted ? '#F59E0B' : '#EF4444' },
+            ]}
+          >
             {stopLossPrice ? `₹${stopLossPrice.toFixed(1)}` : 'Tap Chart'}
           </Text>
         </TouchableOpacity>
@@ -148,11 +276,24 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
           style={[
             styles.levelTab,
             activeLineType === 'TP' && styles.tpActiveTab,
+            isTpInverted && styles.invalidLevelTab,
           ]}
           onPress={() => setActiveLineType('TP')}
         >
-          <Text style={[styles.levelTabLabel, { color: '#34D399' }]}>Target</Text>
-          <Text style={[styles.levelTabValue, { color: '#10B981' }]}>
+          <Text
+            style={[
+              styles.levelTabLabel,
+              { color: isTpInverted ? '#FBBF24' : '#34D399' },
+            ]}
+          >
+            {isTpInverted ? '⚠️ Target' : 'Target'}
+          </Text>
+          <Text
+            style={[
+              styles.levelTabValue,
+              { color: isTpInverted ? '#F59E0B' : '#10B981' },
+            ]}
+          >
             {targetPrice ? `₹${targetPrice.toFixed(1)}` : 'Tap Chart'}
           </Text>
         </TouchableOpacity>
@@ -162,15 +303,25 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
       <View style={styles.metricsCard}>
         <View style={styles.metricCol}>
           <Text style={styles.metricLabel}>Max Risk</Text>
-          <Text style={[styles.metricVal, { color: '#EF4444' }]}>
-            {totalRisk > 0 ? `-₹${totalRisk}` : 'None'}
+          <Text
+            style={[
+              styles.metricVal,
+              { color: isSlInverted ? '#F59E0B' : '#EF4444' },
+            ]}
+          >
+            {isSlInverted ? '⚠️ Check SL' : totalRisk > 0 ? `-₹${totalRisk}` : 'None'}
           </Text>
         </View>
         <View style={styles.metricDivider} />
         <View style={styles.metricCol}>
           <Text style={styles.metricLabel}>Target Reward</Text>
-          <Text style={[styles.metricVal, { color: '#10B981' }]}>
-            {totalReward > 0 ? `+₹${totalReward}` : 'None'}
+          <Text
+            style={[
+              styles.metricVal,
+              { color: isTpInverted ? '#F59E0B' : '#10B981' },
+            ]}
+          >
+            {isTpInverted ? '⚠️ Check TP' : totalReward > 0 ? `+₹${totalReward}` : 'None'}
           </Text>
         </View>
         <View style={styles.metricDivider} />
@@ -200,10 +351,10 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         onPress={onPlaceOrder}
         disabled={!validation.allowed || isSubmitting}
       >
-        <Text style={styles.submitBtnText}>
+        <Text style={styles.submitBtnText} numberOfLines={1} adjustsFontSizeToFit>
           {isSubmitting
             ? 'SENDING ORDER...'
-            : `${transactionType} ${lots} LOT (${totalQty} QTY) • ₹${estimatedCapital}`}
+            : `${transactionType} ${isMarketOrder ? 'MKT' : 'LMT'} • ${lots} LOT (${totalQty} QTY) • ₹${estimatedCapital}`}
         </Text>
       </TouchableOpacity>
     </View>
@@ -295,6 +446,74 @@ const styles = StyleSheet.create({
     color: '#64748B',
     fontSize: 9,
   },
+  controlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 8,
+  },
+  orderTypeToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#1E293B',
+    borderRadius: 7,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  orderTypePill: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  orderTypePillActive: {
+    backgroundColor: '#38BDF8',
+  },
+  orderTypeText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  orderTypeTextActive: {
+    color: '#0F172A',
+  },
+  rrPresetsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  rrGroupLabel: {
+    color: '#64748B',
+    fontSize: 10,
+    fontWeight: '700',
+    marginRight: 2,
+  },
+  rrPresetPill: {
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  rrPresetPillActive: {
+    backgroundColor: 'rgba(16, 185, 129, 0.18)',
+    borderColor: '#10B981',
+  },
+  rrPresetPillDisabled: {
+    opacity: 0.4,
+  },
+  rrPresetText: {
+    color: '#CBD5E1',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  rrPresetTextActive: {
+    color: '#34D399',
+  },
   levelTabsRow: {
     flexDirection: 'row',
     gap: 8,
@@ -321,6 +540,10 @@ const styles = StyleSheet.create({
   tpActiveTab: {
     borderColor: '#10B981',
     backgroundColor: 'rgba(16, 185, 129, 0.1)',
+  },
+  invalidLevelTab: {
+    borderColor: '#F59E0B',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
   },
   levelTabLabel: {
     color: '#94A3B8',
