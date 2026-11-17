@@ -1,0 +1,90 @@
+name: Build & Release iOS Unsigned IPA
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: Prebuild Native iOS Project
+        run: npx expo prebuild --platform ios --clean --no-install
+
+      - name: Install CocoaPods Dependencies
+        working-directory: ios
+        run: pod install
+
+      - name: Build Unsigned iOS App (.app)
+        working-directory: ios
+        run: |
+          WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -n 1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "ERROR: No .xcworkspace found in ios/"
+            exit 1
+          fi
+          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/{flag=1; next} flag && NF {gsub(/^[ \t]+/, ""); print; exit}')
+          if [ -z "$SCHEME" ]; then
+            SCHEME="DhanOptionsTrader"
+          fi
+          echo "Using workspace=$WORKSPACE scheme=$SCHEME"
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -derivedDataPath build \
+            build
+
+      - name: Package Unsigned IPA
+        run: |
+          APP_PATH=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app bundle produced in ios/build/Build/Products/Release-iphoneos"
+            exit 1
+          fi
+          echo "Packaging $APP_PATH into DhanOptionsTrader-unsigned.ipa..."
+          rm -rf ipa_staging DhanOptionsTrader-unsigned.ipa
+          mkdir -p ipa_staging/Payload
+          cp -R "$APP_PATH" ipa_staging/Payload/
+          (cd ipa_staging && zip -r -y ../DhanOptionsTrader-unsigned.ipa Payload)
+          ls -lh DhanOptionsTrader-unsigned.ipa
+
+      - name: Determine Release Tag
+        id: vars
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_NAME=v1.0.1-$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Attach Unsigned IPA to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.TAG_NAME }}
+          name: Dhan Options Trader ${{ steps.vars.outputs.TAG_NAME }}
+          files: |
+            DhanOptionsTrader-unsigned.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

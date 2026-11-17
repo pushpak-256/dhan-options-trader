@@ -1,6 +1,16 @@
 # ⚡ Dhan Options Trader — Mobile App Wrapper
 
-A high-performance, mobile-first options trading wrapper built with **React Native (Expo SDK 58)** for **DhanHQ API v2**. Designed specifically for disciplined options traders on **NIFTY 50**, **BANKNIFTY**, and **BSE SENSEX**, featuring visual on-chart order placement, strict customizable psychological risk guardrails, and frictionless GitHub APK distribution with built-in auto-updates for you and your friends.
+A high-performance, mobile-first options trading wrapper built with **React Native (Expo)** for **DhanHQ API v2**. Designed specifically for disciplined options traders on **NIFTY 50**, **BANKNIFTY**, and **BSE SENSEX**, featuring visual on-chart order placement, strict customizable psychological risk guardrails (with Auto-Exit Kill Switch), and frictionless distribution.
+
+---
+
+## ⬇️ 1-Click Install & Download
+
+| Platform | Direct Link | Notes |
+|---|---|---|
+| 🌐 **Instant iOS & Android PWA** *(Live Now)* | [**Launch Web App →**](https://pushpak-256.github.io/dhan-options-trader/) | Open in Safari (iOS) or Chrome (Android) → **Add to Home Screen** |
+| 🤖 **Android APK** | [**Download `app-release.apk` →**](https://github.com/pushpak-256/dhan-options-trader/releases/latest/download/app-release.apk) | Built automatically on release tags (`v*`) via GitHub Actions |
+| 🍎 **iOS Unsigned IPA** *(AltStore / SideStore / LiveContainer)* | [**Download `DhanOptionsTrader-unsigned.ipa` →**](https://github.com/pushpak-256/dhan-options-trader/releases/latest/download/DhanOptionsTrader-unsigned.ipa) | Unsigned `.ipa` built on release tags (`v*`) for sideloading via AltStore / SideStore / LiveContainer |
 
 ---
 

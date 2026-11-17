@@ -52,6 +52,7 @@ jobs:
           if [ -f "$APK_DIR/app-release.apk" ]; then
             echo "✅ Found signed APK: $APK_DIR/app-release.apk"
             cp "$APK_DIR/app-release.apk" dhan-options-trader.apk
+            cp "$APK_DIR/app-release.apk" app-release.apk
           elif [ -f "$APK_DIR/app-release-unsigned.apk" ]; then
             echo "⚠️ Unsigned APK found; signing with debug keystore..."
             APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
@@ -67,11 +68,12 @@ jobs:
               --ks-pass pass:android --key-pass pass:android \
               --out dhan-options-trader.apk \
               "$APK_DIR/app-release-unsigned.apk"
+            cp dhan-options-trader.apk app-release.apk
           else
             echo "❌ ERROR: No release APK produced!"
             exit 1
           fi
-          ls -lh dhan-options-trader.apk
+          ls -lh dhan-options-trader.apk app-release.apk
 
       - name: Determine Release Tag
         id: vars
@@ -127,6 +129,7 @@ jobs:
             - 🛡️ Psychology guardrails (Max daily loss, lot cap, revenge-trade cooldown)
             - 🔄 Auto-update checker built in
           files: |
+            app-release.apk
             dhan-options-trader.apk
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
         env:
