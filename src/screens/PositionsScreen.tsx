@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { DhanApiService } from '../services/dhanApi';
 import { ComplianceEngine } from '../services/complianceEngine';
+import { AutoSquareOffEngine } from '../services/autoSquareOffEngine';
+import { StorageService } from '../services/storage';
 import { DhanPosition } from '../types/dhan';
 
 interface PositionsScreenProps {
@@ -20,9 +22,13 @@ export const PositionsScreen: React.FC<PositionsScreenProps> = ({ onRefreshPnl }
   const [positions, setPositions] = useState<DhanPosition[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const [isDemoMode, setIsDemoMode] = useState(true);
+
   const loadPositions = async () => {
     try {
       setLoading(true);
+      const demo = await DhanApiService.isDemoMode();
+      setIsDemoMode(demo);
       const data = await DhanApiService.getPositions();
       setPositions(data);
     } catch (e) {
@@ -40,49 +46,42 @@ export const PositionsScreen: React.FC<PositionsScreenProps> = ({ onRefreshPnl }
   const totalUnrealized = positions.reduce((acc, p) => acc + (p.unrealizedProfit || 0), 0);
   const totalPnl = totalRealized + totalUnrealized;
 
-  const handleExitPosition = (pos: DhanPosition) => {
-    Alert.alert(
-      'Confirm Exit',
-      `Exit ${pos.tradingSymbol} (Qty: ${pos.netQty}) at market price?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Confirm Exit',
-          style: 'destructive',
-          onPress: async () => {
-            // Close position simulation or API
-            await ComplianceEngine.recordTradeResult(pos.unrealizedProfit);
-            Alert.alert('Position Closed', `Realized P&L: ₹${pos.unrealizedProfit}`);
-            loadPositions();
-            onRefreshPnl();
-          },
-        },
-      ]
-    );
+  const handleExitPosition = async (pos: DhanPosition) => {
+    try {
+      const res = await DhanApiService.exitPosition(pos);
+      await ComplianceEngine.recordTradeResult(pos.unrealizedProfit);
+      Alert.alert(
+        'Position Closed via Dhan API',
+        `${pos.tradingSymbol} exited (Order: ${res?.orderId || 'OK'})\nRealized P&L: ₹${pos.unrealizedProfit}`
+      );
+      await loadPositions();
+      onRefreshPnl();
+    } catch (err: any) {
+      Alert.alert('Exit Failed', err.message || 'Could not close position.');
+    }
   };
 
-  const handleExitAll = () => {
-    Alert.alert(
-      '🚨 PANIC EXIT ALL',
-      'This will immediately close ALL open positions at market price. Are you sure?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'EXIT EVERYTHING',
-          style: 'destructive',
-          onPress: async () => {
-            for (const pos of positions) {
-              if (pos.netQty !== 0) {
-                await ComplianceEngine.recordTradeResult(pos.unrealizedProfit);
-              }
-            }
-            Alert.alert('All Positions Exited', 'Orders placed to square off all positions.');
-            loadPositions();
-            onRefreshPnl();
-          },
-        },
-      ]
-    );
+  const handleExitAll = async () => {
+    try {
+      const summary = await DhanApiService.squareOffAllPositions();
+      Alert.alert(
+        '🚨 All Positions Exited via Dhan API',
+        `Squared off ${summary.exitedCount} position(s), cancelled ${summary.cancelledOrdersCount} pending order(s).`
+      );
+      await loadPositions();
+      onRefreshPnl();
+    } catch (err: any) {
+      Alert.alert('Square Off Error', err.message || 'Failed to exit all positions.');
+    }
+  };
+
+  const handleSimulateMaxSlBreach = async () => {
+    const config = await StorageService.getComplianceConfig();
+    const breachAmount = (config.maxDailyLossAmount || 5000) + 500;
+    DhanApiService.simulateDemoLossBreach(breachAmount);
+    await AutoSquareOffEngine.checkAndEnforce();
+    await loadPositions();
+    onRefreshPnl();
   };
 
   if (loading && positions.length === 0) {
@@ -124,6 +123,15 @@ export const PositionsScreen: React.FC<PositionsScreenProps> = ({ onRefreshPnl }
           <Text style={styles.breakdownText}>
             Unrealized: <Text style={totalUnrealized >= 0 ? styles.textGreen : styles.textRed}>₹{totalUnrealized.toFixed(0)}</Text>
           </Text>
+        </View>
+
+        <View style={styles.guardBar}>
+          <Text style={styles.guardText}>🛡️ Auto-Exit Kill Switch: Monitoring Live MTM</Text>
+          {isDemoMode && (
+            <TouchableOpacity style={styles.simBreachBtn} onPress={handleSimulateMaxSlBreach}>
+              <Text style={styles.simBreachText}>⚡ Test Max SL Breach</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -244,6 +252,33 @@ const styles = StyleSheet.create({
   breakdownText: {
     color: '#94A3B8',
     fontSize: 12,
+  },
+  guardBar: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  guardText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  simBreachBtn: {
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  simBreachText: {
+    color: '#F59E0B',
+    fontSize: 10,
+    fontWeight: '800',
   },
   textGreen: {
     color: '#10B981',

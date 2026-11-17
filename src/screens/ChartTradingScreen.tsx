@@ -5,12 +5,14 @@ import { ChartOrderPanel } from '../components/ChartOrderPanel';
 import { DhanApiService } from '../services/dhanApi';
 import { DhanWebSocketService } from '../services/dhanWebSocket';
 import { ComplianceEngine } from '../services/complianceEngine';
+import { AutoSquareOffEngine } from '../services/autoSquareOffEngine';
 import {
   CandleData,
   OptionContract,
   TransactionType,
   OrderType,
   DhanOrderRequest,
+  DhanPosition,
 } from '../types/dhan';
 import { OrderPreFlightValidation } from '../types/compliance';
 import { SUPPORTED_INDICES } from '../constants/indices';
@@ -36,12 +38,13 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
   const [lots, setLots] = useState(1);
   const [entryPrice, setEntryPrice] = useState(selectedContract.ltp || 150);
   const [stopLossPrice, setStopLossPrice] = useState<number | undefined>(
-    Number((selectedContract.ltp * 0.85).toFixed(1))
+    Number((selectedContract.ltp * 0.93).toFixed(1))
   );
   const [targetPrice, setTargetPrice] = useState<number | undefined>(
-    Number((selectedContract.ltp * 1.3).toFixed(1))
+    Number((selectedContract.ltp * 1.12).toFixed(1))
   );
   const [activeLineType, setActiveLineType] = useState<'ENTRY' | 'SL' | 'TP'>('SL');
+  const [activePosition, setActivePosition] = useState<DhanPosition | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [validation, setValidation] = useState<OrderPreFlightValidation>({
     allowed: true,
@@ -54,6 +57,36 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
     SUPPORTED_INDICES[selectedContract.symbol] || SUPPORTED_INDICES.NIFTY;
   const lotSize = selectedContract.lotSize || indexConfig.lotSize;
 
+  // Smartly flip SL & TP when switching between BUY (Long) and SELL (Short)
+  const handleSetTransactionType = (newSide: TransactionType) => {
+    setTransactionType(newSide);
+    if (newSide === 'BUY') {
+      if (stopLossPrice && stopLossPrice >= entryPrice) {
+        setStopLossPrice(Number((entryPrice * 0.88).toFixed(1)));
+      }
+      if (targetPrice && targetPrice <= entryPrice) {
+        setTargetPrice(Number((entryPrice * 1.24).toFixed(1)));
+      }
+    } else {
+      if (stopLossPrice && stopLossPrice <= entryPrice) {
+        setStopLossPrice(Number((entryPrice * 1.12).toFixed(1)));
+      }
+      if (targetPrice && targetPrice >= entryPrice) {
+        setTargetPrice(Number((entryPrice * 0.76).toFixed(1)));
+      }
+    }
+  };
+
+  const refreshActivePosition = useCallback(async () => {
+    try {
+      const positions = await DhanApiService.getPositions();
+      const match = positions.find(
+        (p) => p.securityId === selectedContract.securityId && p.netQty !== 0
+      );
+      setActivePosition(match || null);
+    } catch {}
+  }, [selectedContract.securityId]);
+
   // Load candles
   const loadCandles = useCallback(async () => {
     const data = await DhanApiService.getChartCandles(
@@ -64,9 +97,15 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
       setCandles(data);
       const lastCandle = data[data.length - 1];
       setEntryPrice(lastCandle.close);
-      setStopLossPrice(Number((lastCandle.close * 0.85).toFixed(1)));
-      setTargetPrice(Number((lastCandle.close * 1.3).toFixed(1)));
+      if (transactionType === 'BUY') {
+        setStopLossPrice(Number((lastCandle.close * 0.93).toFixed(1)));
+        setTargetPrice(Number((lastCandle.close * 1.12).toFixed(1)));
+      } else {
+        setStopLossPrice(Number((lastCandle.close * 1.07).toFixed(1)));
+        setTargetPrice(Number((lastCandle.close * 0.88).toFixed(1)));
+      }
     }
+    await refreshActivePosition();
   }, [selectedContract]);
 
   useEffect(() => {
@@ -81,7 +120,6 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
       selectedContract.securityId,
       (tick) => {
         if (tick && tick.ltp) {
-          // If in MARKET order type, sync entry with live tick
           if (orderType === 'MARKET') {
             setEntryPrice(tick.ltp);
           }
@@ -131,45 +169,78 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
     runValidation();
   }, [runValidation]);
 
-  // Handle tap on chart
-  const handlePriceSelected = (price: number) => {
-    if (activeLineType === 'ENTRY') {
+  // Handle dragging ENTRY, SL, or TP directly on the chart
+  const handleLevelChange = (line: 'ENTRY' | 'SL' | 'TP', price: number) => {
+    if (line === 'ENTRY') {
       setEntryPrice(price);
-    } else if (activeLineType === 'SL') {
+      setActiveLineType('ENTRY');
+    } else if (line === 'SL') {
       setStopLossPrice(price);
-    } else if (activeLineType === 'TP') {
+      setActiveLineType('SL');
+    } else if (line === 'TP') {
       setTargetPrice(price);
+      setActiveLineType('TP');
     }
   };
 
-  // Place order
-  const handlePlaceOrder = async () => {
-    if (!validation.allowed) {
-      Alert.alert('Order Blocked by Compliance', validation.reasons.join('\n'));
+  // Execute order (used by both bottom CTA button and on-chart Quick BUY/SELL buttons)
+  const executeOrder = async (overrideSide?: TransactionType, overridePrice?: number) => {
+    const side = overrideSide || transactionType;
+    const price = overridePrice ?? entryPrice;
+
+    // Auto-adjust SL/TP if user clicked opposite Quick Order directly on chart
+    let sl = stopLossPrice;
+    let tp = targetPrice;
+    if (overrideSide && overrideSide !== transactionType) {
+      setTransactionType(overrideSide);
+      if (overrideSide === 'BUY') {
+        sl = Number((price * 0.88).toFixed(1));
+        tp = Number((price * 1.24).toFixed(1));
+      } else {
+        sl = Number((price * 1.12).toFixed(1));
+        tp = Number((price * 0.76).toFixed(1));
+      }
+      setStopLossPrice(sl);
+      setTargetPrice(tp);
+    }
+
+    const totalQty = lots * lotSize;
+    const orderReq: DhanOrderRequest = {
+      transactionType: side,
+      exchangeSegment: selectedContract.exchangeSegment,
+      productType: 'INTRADAY',
+      orderType,
+      validity: 'DAY',
+      securityId: selectedContract.securityId,
+      quantity: totalQty,
+      price: orderType === 'LIMIT' ? price : undefined,
+      triggerPrice: sl,
+    };
+
+    const preFlight = await ComplianceEngine.validateOrder({
+      order: orderReq,
+      lotSize,
+      entryPrice: price,
+      stopLossPrice: sl,
+      targetPrice: tp,
+    });
+    setValidation(preFlight);
+
+    if (!preFlight.allowed) {
+      Alert.alert('Order Blocked by Compliance', preFlight.reasons.join('\n'));
       return;
     }
 
     try {
       setIsSubmitting(true);
-      const totalQty = lots * lotSize;
+      const res = await DhanApiService.placeOrder(orderReq, selectedContract.tradingSymbol);
 
-      const orderReq: DhanOrderRequest = {
-        transactionType,
-        exchangeSegment: selectedContract.exchangeSegment,
-        productType: 'INTRADAY',
-        orderType,
-        validity: 'DAY',
-        securityId: selectedContract.securityId,
-        quantity: totalQty,
-        price: orderType === 'LIMIT' ? entryPrice : undefined,
-        triggerPrice: stopLossPrice,
-      };
-
-      const res = await DhanApiService.placeOrder(orderReq);
+      await refreshActivePosition();
+      await AutoSquareOffEngine.checkAndEnforce();
 
       Alert.alert(
         'Order Executed!',
-        `Order ID: ${res.orderId}\nStatus: ${res.orderStatus}\n${transactionType} ${lots} lot (${totalQty} qty) of ${selectedContract.tradingSymbol} @ ₹${entryPrice.toFixed(1)}\nSL: ₹${stopLossPrice?.toFixed(1) || 'None'}\nTarget: ₹${targetPrice?.toFixed(1) || 'None'}`
+        `Order ID: ${res.orderId}\nStatus: ${res.orderStatus}\n${side} ${lots} lot (${totalQty} qty) of ${selectedContract.tradingSymbol} @ ₹${price.toFixed(1)}\nSL: ₹${sl?.toFixed(1) || 'None'}\nTarget: ₹${tp?.toFixed(1) || 'None'}`
       );
 
       if (onTradeExecuted) onTradeExecuted();
@@ -177,6 +248,23 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
       Alert.alert('Execution Failed', err.message || 'Could not place order.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Quick Exit Open Position directly from chart button
+  const handleQuickExitPosition = async (pos: DhanPosition) => {
+    try {
+      const res = await DhanApiService.exitPosition(pos);
+      await ComplianceEngine.recordTradeResult(pos.unrealizedProfit);
+      await refreshActivePosition();
+      await AutoSquareOffEngine.checkAndEnforce();
+      Alert.alert(
+        'Position Exited!',
+        `Closed ${pos.tradingSymbol} via Dhan API (Order: ${res?.orderId || 'OK'})`
+      );
+      if (onTradeExecuted) onTradeExecuted();
+    } catch (err: any) {
+      Alert.alert('Exit Failed', err.message || 'Could not exit position.');
     }
   };
 
@@ -206,17 +294,21 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
         </TouchableOpacity>
       </View>
 
-      {/* Interactive TradingView Chart with VWAP & EMA Indicators */}
+      {/* Interactive TradingView Chart with Drag Handles, TP/SL Box, Drawing Tools & On-Chart Orders */}
       <View style={styles.chartWrapper}>
         <InteractiveChart
           candles={candles}
           symbol={selectedContract.tradingSymbol}
+          transactionType={transactionType}
           entryPrice={entryPrice}
           stopLossPrice={stopLossPrice}
           targetPrice={targetPrice}
           lotSize={lotSize}
           lots={lots}
-          onPriceSelected={handlePriceSelected}
+          activePosition={activePosition}
+          onLevelChange={handleLevelChange}
+          onQuickOrder={(side, price) => executeOrder(side, price)}
+          onQuickExitPosition={handleQuickExitPosition}
           activeLineType={activeLineType}
           showVWAP={showVWAP}
           showEMA9={showEMA9}
@@ -230,7 +322,7 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
       {/* Bottom Order Panel */}
       <ChartOrderPanel
         transactionType={transactionType}
-        setTransactionType={setTransactionType}
+        setTransactionType={handleSetTransactionType}
         orderType={orderType}
         setOrderType={setOrderType}
         lots={lots}
@@ -245,7 +337,7 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
         activeLineType={activeLineType}
         setActiveLineType={setActiveLineType}
         validation={validation}
-        onPlaceOrder={handlePlaceOrder}
+        onPlaceOrder={() => executeOrder()}
         isSubmitting={isSubmitting}
       />
     </View>

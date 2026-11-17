@@ -137,6 +137,15 @@ export class ComplianceEngine {
           message: 'For BUY order, Stop Loss must be strictly below Entry price.',
         });
         reasons.push('Stop Loss must be below Entry price.');
+      } else if (order.transactionType === 'SELL' && stopLossPrice <= entryPrice) {
+        checks.push({
+          ruleId: 'MANDATORY_SL',
+          ruleName: 'Mandatory Stop Loss',
+          passed: false,
+          severity: 'BLOCK',
+          message: 'For SELL order, Stop Loss must be strictly above Entry price.',
+        });
+        reasons.push('For SELL order, drag Stop Loss above Entry price.');
       } else {
         checks.push({
           ruleId: 'MANDATORY_SL',

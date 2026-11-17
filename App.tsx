@@ -11,6 +11,7 @@ import { UpdateModal } from './src/components/UpdateModal';
 import { GitHubUpdaterService } from './src/services/githubUpdater';
 import { DhanApiService } from './src/services/dhanApi';
 import { StorageService } from './src/services/storage';
+import { AutoSquareOffEngine, KillSwitchEvent } from './src/services/autoSquareOffEngine';
 import { OptionContract } from './src/types/dhan';
 import { UpdateInfo } from './src/types/updater';
 import { generateMockOptionChain } from './src/services/mockData';
@@ -30,11 +31,26 @@ export default function App() {
   const [todayPnl, setTodayPnl] = useState(0);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [killSwitchBanner, setKillSwitchBanner] = useState<KillSwitchEvent | null>(null);
 
-  // Initialize and check for update on app startup
+  // Initialize, check updates, and start Max SL Auto-Exit Kill Switch monitor
   useEffect(() => {
     refreshAccountState();
     checkAppUpdates();
+
+    AutoSquareOffEngine.startMonitoring(3000);
+    const unsubPnl = AutoSquareOffEngine.onPnlUpdate((totalPnl) => {
+      setTodayPnl(totalPnl);
+    });
+    const unsubKill = AutoSquareOffEngine.onKillSwitchTriggered((event) => {
+      setKillSwitchBanner(event);
+    });
+
+    return () => {
+      unsubPnl();
+      unsubKill();
+      AutoSquareOffEngine.stopMonitoring();
+    };
   }, []);
 
   const refreshAccountState = async () => {
@@ -88,6 +104,26 @@ export default function App() {
           onPressSettings={() => setActiveTab('SETTINGS')}
           activeScreenTitle={getScreenTitle()}
         />
+
+        {/* Max Daily SL Auto-Exit Kill Switch Banner */}
+        {killSwitchBanner && (
+          <View style={styles.killSwitchBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.killSwitchTitle}>
+                🚨 MAX DAILY SL HIT (-₹{Math.round(killSwitchBanner.actualLoss)}) — AUTO-EXITED ALL POSITIONS
+              </Text>
+              <Text style={styles.killSwitchDesc}>
+                Exited {killSwitchBanner.summary.exitedCount} position(s) & cancelled {killSwitchBanner.summary.cancelledOrdersCount} pending order(s) via Dhan API. Account locked for today.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.killDismissBtn}
+              onPress={() => setKillSwitchBanner(null)}
+            >
+              <Text style={styles.killDismissText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Active Screen View */}
         <View style={styles.content}>
@@ -240,5 +276,35 @@ const styles = StyleSheet.create({
   },
   tabLabelActive: {
     color: '#38BDF8',
+  },
+  killSwitchBanner: {
+    backgroundColor: '#7F1D1D',
+    borderBottomWidth: 2,
+    borderBottomColor: '#EF4444',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  killSwitchTitle: {
+    color: '#FEF2F2',
+    fontWeight: '900',
+    fontSize: 11,
+  },
+  killSwitchDesc: {
+    color: '#FECACA',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  killDismissBtn: {
+    padding: 6,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderRadius: 6,
+  },
+  killDismissText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 12,
   },
 });

@@ -34,6 +34,16 @@ function getDhanBaseUrl(): string {
   return 'https://api.dhan.co/v2';
 }
 
+export interface SquareOffSummary {
+  exitedCount: number;
+  cancelledOrdersCount: number;
+  orderIds: string[];
+  exitedSymbols: string[];
+  totalPnlAtExit: number;
+}
+
+let demoPositionsStore: DhanPosition[] = [...MOCK_POSITIONS.map((p) => ({ ...p }))];
+
 export class DhanApiService {
   private static client: AxiosInstance | null = null;
   private static cachedCreds: DhanCredentials | null = null;
@@ -216,23 +226,111 @@ export class DhanApiService {
   }
 
   // 5. Order Placement (with Bracket/SL-Trigger support)
-  static async placeOrder(orderReq: DhanOrderRequest): Promise<DhanOrderResponse> {
+  static async placeOrder(
+    orderReq: DhanOrderRequest,
+    tradingSymbol?: string
+  ): Promise<DhanOrderResponse> {
     const isDemo = await this.isDemoMode();
     if (isDemo) {
-      // Realistic simulation
+      const orderId = `SIM_${Date.now().toString().slice(-6)}`;
+      const fillPrice = orderReq.price || 140;
+      const signedQty =
+        orderReq.transactionType === 'BUY' ? orderReq.quantity : -orderReq.quantity;
+
+      const existing = demoPositionsStore.find(
+        (p) => p.securityId === orderReq.securityId
+      );
+      if (existing) {
+        existing.netQty += signedQty;
+        if (orderReq.transactionType === 'BUY') {
+          existing.buyQty += orderReq.quantity;
+          existing.buyAvg = fillPrice;
+        } else {
+          existing.sellQty += orderReq.quantity;
+          existing.sellAvg = fillPrice;
+        }
+        existing.ltp = fillPrice;
+      } else {
+        demoPositionsStore.unshift({
+          securityId: orderReq.securityId,
+          tradingSymbol: tradingSymbol || orderReq.securityId,
+          exchangeSegment: orderReq.exchangeSegment,
+          productType: orderReq.productType,
+          buyQty: orderReq.transactionType === 'BUY' ? orderReq.quantity : 0,
+          buyAvg: orderReq.transactionType === 'BUY' ? fillPrice : 0,
+          sellQty: orderReq.transactionType === 'SELL' ? orderReq.quantity : 0,
+          sellAvg: orderReq.transactionType === 'SELL' ? fillPrice : 0,
+          netQty: signedQty,
+          realizedProfit: 0,
+          unrealizedProfit: 0,
+          costPrice: fillPrice,
+          ltp: fillPrice,
+          dayPnl: 0,
+        });
+      }
+
       return {
-        orderId: `SIM_${Date.now().toString().slice(-6)}`,
+        orderId,
         orderStatus: 'TRADED',
       };
     }
 
     try {
       const client = await this.getClient();
-      const res = await client.post('/orders', orderReq);
+      const creds = await StorageService.getCredentials();
+      const payload = {
+        ...orderReq,
+        dhanClientId: orderReq.dhanClientId || creds?.clientId,
+      };
+      const res = await client.post('/orders', payload);
       return res.data;
     } catch (err: any) {
-      const message = err.response?.data?.message || err.message || 'Order failed at broker.';
+      const message =
+        err.response?.data?.internalErrorMessage ||
+        err.response?.data?.message ||
+        err.message ||
+        'Order failed at broker.';
       throw new Error(message);
+    }
+  }
+
+  // 5b. Modify Open Order (used when dragging live order / SL / TP line on chart)
+  static async modifyOrder(
+    orderId: string,
+    params: {
+      orderType: 'LIMIT' | 'MARKET' | 'STOP_LOSS' | 'STOP_LOSS_MARKET';
+      quantity: number;
+      price?: number;
+      triggerPrice?: number;
+      validity?: 'DAY' | 'IOC';
+    }
+  ): Promise<DhanOrderResponse> {
+    const isDemo = await this.isDemoMode();
+    if (isDemo) {
+      return {
+        orderId,
+        orderStatus: 'PENDING',
+      };
+    }
+
+    try {
+      const client = await this.getClient();
+      const creds = await StorageService.getCredentials();
+      const res = await client.put(`/orders/${orderId}`, {
+        dhanClientId: creds?.clientId,
+        orderId,
+        orderType: params.orderType,
+        legName: 'ENTRY_LEG',
+        quantity: params.quantity,
+        price: params.price ?? 0,
+        triggerPrice: params.triggerPrice ?? 0,
+        validity: params.validity || 'DAY',
+      });
+      return res.data;
+    } catch (err: any) {
+      throw new Error(
+        err.response?.data?.message || err.message || 'Failed to modify order.'
+      );
     }
   }
 
@@ -240,15 +338,15 @@ export class DhanApiService {
   static async getPositions(): Promise<DhanPosition[]> {
     const isDemo = await this.isDemoMode();
     if (isDemo) {
-      return MOCK_POSITIONS;
+      return demoPositionsStore.map((p) => ({ ...p }));
     }
 
     try {
       const client = await this.getClient();
       const res = await client.get('/positions');
-      return res.data || [];
+      return Array.isArray(res.data) ? res.data : [];
     } catch {
-      return MOCK_POSITIONS;
+      return demoPositionsStore.map((p) => ({ ...p }));
     }
   }
 
@@ -261,7 +359,7 @@ export class DhanApiService {
     try {
       const client = await this.getClient();
       const res = await client.get('/orders');
-      return res.data || [];
+      return Array.isArray(res.data) ? res.data : [];
     } catch {
       return [];
     }
@@ -277,6 +375,111 @@ export class DhanApiService {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  // 7. Exit a single open position at MARKET via DhanHQ API
+  static async exitPosition(pos: DhanPosition): Promise<DhanOrderResponse | null> {
+    if (pos.netQty === 0) return null;
+
+    const isDemo = await this.isDemoMode();
+    const exitType: 'BUY' | 'SELL' = pos.netQty > 0 ? 'SELL' : 'BUY';
+    const exitQty = Math.abs(pos.netQty);
+
+    if (isDemo) {
+      const target = demoPositionsStore.find(
+        (p) => p.securityId === pos.securityId
+      );
+      if (target) {
+        target.realizedProfit += target.unrealizedProfit;
+        target.unrealizedProfit = 0;
+        target.netQty = 0;
+      }
+      return {
+        orderId: `EXIT_${Date.now().toString().slice(-6)}`,
+        orderStatus: 'TRADED',
+      };
+    }
+
+    return this.placeOrder({
+      transactionType: exitType,
+      exchangeSegment:
+        pos.exchangeSegment === 'BSE_FNO' ? 'BSE_FNO' : 'NSE_FNO',
+      productType: (pos.productType as any) || 'INTRADAY',
+      orderType: 'MARKET',
+      validity: 'DAY',
+      securityId: pos.securityId,
+      quantity: exitQty,
+      price: 0,
+    });
+  }
+
+  // 8. Auto-Exit / Kill-Switch: Cancel all pending orders & square off ALL open positions via Dhan API
+  static async squareOffAllPositions(): Promise<SquareOffSummary> {
+    const positions = await this.getPositions();
+    const orders = await this.getOrders();
+
+    let cancelledOrdersCount = 0;
+    const orderIds: string[] = [];
+    const exitedSymbols: string[] = [];
+    let totalPnlAtExit = 0;
+
+    // Step 1: Cancel all PENDING/TRANSIT orders so nothing re-triggers
+    for (const ord of orders) {
+      if (ord.orderStatus === 'PENDING' || ord.orderStatus === 'TRANSIT') {
+        const ok = await this.cancelOrder(ord.orderId);
+        if (ok) cancelledOrdersCount += 1;
+      }
+    }
+
+    // Step 2: Square off every open position at MARKET
+    for (const pos of positions) {
+      totalPnlAtExit += (pos.realizedProfit || 0) + (pos.unrealizedProfit || 0);
+      if (pos.netQty !== 0) {
+        try {
+          const res = await this.exitPosition(pos);
+          if (res) {
+            orderIds.push(res.orderId);
+            exitedSymbols.push(`${pos.tradingSymbol} (${pos.netQty > 0 ? 'SELL' : 'BUY'} ${Math.abs(pos.netQty)})`);
+          }
+        } catch (err) {
+          console.error(`Failed to auto-exit ${pos.tradingSymbol}:`, err);
+        }
+      }
+    }
+
+    return {
+      exitedCount: exitedSymbols.length,
+      cancelledOrdersCount,
+      orderIds,
+      exitedSymbols,
+      totalPnlAtExit,
+    };
+  }
+
+  // Helper to simulate a Max Daily Loss breach in Demo Mode so user can test the Auto-Exit Kill Switch safely
+  static simulateDemoLossBreach(lossAmount: number): void {
+    const openPos = demoPositionsStore.find((p) => p.netQty !== 0);
+    if (openPos) {
+      openPos.unrealizedProfit = -Math.abs(lossAmount);
+      openPos.dayPnl = -Math.abs(lossAmount);
+    } else {
+      demoPositionsStore.unshift({
+        securityId: 'MOCK_NIFTY_24200_CE',
+        tradingSymbol: 'NIFTY 24200 CE',
+        exchangeSegment: 'NSE_FNO',
+        productType: 'INTRADAY',
+        buyQty: 50,
+        buyAvg: 150,
+        sellQty: 0,
+        sellAvg: 0,
+        netQty: 50,
+        realizedProfit: 0,
+        unrealizedProfit: -Math.abs(lossAmount),
+        costPrice: 150,
+        ltp: Math.max(5, 150 - Math.abs(lossAmount) / 50),
+        dayPnl: -Math.abs(lossAmount),
+      });
     }
   }
 }
