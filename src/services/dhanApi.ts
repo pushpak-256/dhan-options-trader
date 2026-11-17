@@ -5,6 +5,8 @@ import {
   DhanProfile,
   DhanFundLimit,
   OptionChainData,
+  OptionContract,
+  OptionStrikeRow,
   CandleData,
   DhanOrderRequest,
   DhanOrderResponse,
@@ -136,6 +138,8 @@ export class DhanApiService {
   }
 
   // 3. Option Chain (NIFTY, BANKNIFTY, SENSEX)
+  // Parses DhanHQ v2 /optionchain real response:
+  //   { data: { last_price, oc: { "24200.000000": { ce: { last_price, previous_close_price, oi, previous_oi, volume, implied_volatility, greeks: { delta, theta, gamma, vega }, top_bid_price, top_ask_price, security_id }, pe: { ... } } } } }
   static async getOptionChain(indexKey: string, expiry?: string): Promise<OptionChainData> {
     const isDemo = await this.isDemoMode();
     if (isDemo) {
@@ -149,6 +153,8 @@ export class DhanApiService {
       const idxConfig = SUPPORTED_INDICES[indexKey] || SUPPORTED_INDICES.NIFTY;
       const underlyingScrip = Number(idxConfig.underlyingSecurityId) || 13;
 
+      // --- Fetch expiry list if none supplied ---
+      let expiryDates: string[] = [];
       let targetExpiry = expiry;
       if (!targetExpiry) {
         const expRes = await client.post('/optionchain/expirylist', {
@@ -156,7 +162,8 @@ export class DhanApiService {
           UnderlyingSeg: 'IDX_I',
         });
         if (expRes.data?.data?.length > 0) {
-          targetExpiry = expRes.data.data[0];
+          expiryDates = expRes.data.data;
+          targetExpiry = expiryDates[0];
         }
       }
 
@@ -166,10 +173,123 @@ export class DhanApiService {
         Expiry: targetExpiry,
       });
 
-      if (res.data && res.data.data && Array.isArray(res.data.data.strikes)) {
-        return res.data.data;
+      // --- Parse real DhanHQ v2 oc map ---
+      const responseData = res.data?.data;
+      const ocMap: Record<string, any> | undefined = responseData?.oc;
+
+      if (!responseData || !ocMap || Object.keys(ocMap).length === 0) {
+        return generateMockOptionChain(indexKey);
       }
-      return generateMockOptionChain(indexKey);
+
+      const underlyingLtp: number = responseData.last_price ?? 0;
+      const step = idxConfig.strikeStep;
+      const atmStrike = Math.round(underlyingLtp / step) * step;
+
+      const strikes: OptionStrikeRow[] = [];
+
+      for (const strikePriceStr of Object.keys(ocMap)) {
+        const strikePrice = parseFloat(strikePriceStr);
+        if (isNaN(strikePrice)) continue;
+
+        const entry = ocMap[strikePriceStr];
+        const rawCe = entry?.ce;
+        const rawPe = entry?.pe;
+
+        const ceGreeks = rawCe?.greeks || {};
+        const peGreeks = rawPe?.greeks || {};
+
+        const ceLtp = rawCe?.last_price ?? 0;
+        const cePrevClose = rawCe?.previous_close_price ?? 0;
+        const ceChange = cePrevClose ? ceLtp - cePrevClose : 0;
+        const ceChangePct = cePrevClose ? (ceChange / cePrevClose) * 100 : 0;
+        const ceOi = rawCe?.oi ?? 0;
+        const cePrevOi = rawCe?.previous_oi ?? 0;
+
+        const peLtp = rawPe?.last_price ?? 0;
+        const pePrevClose = rawPe?.previous_close_price ?? 0;
+        const peChange = pePrevClose ? peLtp - pePrevClose : 0;
+        const peChangePct = pePrevClose ? (peChange / pePrevClose) * 100 : 0;
+        const peOi = rawPe?.oi ?? 0;
+        const pePrevOi = rawPe?.previous_oi ?? 0;
+
+        const callContract: OptionContract = {
+          securityId: String(rawCe?.security_id ?? `${indexKey}_${strikePrice}_CE`),
+          tradingSymbol: `${indexKey} ${targetExpiry || ''} ${strikePrice} CE`,
+          symbol: indexKey,
+          strikePrice,
+          optionType: 'CALL',
+          expiryDate: targetExpiry || '',
+          exchangeSegment: idxConfig.exchangeSegment,
+          lotSize: idxConfig.lotSize,
+          ltp: ceLtp,
+          previousClose: cePrevClose,
+          change: Number(ceChange.toFixed(2)),
+          changePercent: Number(ceChangePct.toFixed(2)),
+          oi: ceOi,
+          oiChange: ceOi - cePrevOi,
+          volume: rawCe?.volume ?? 0,
+          iv: rawCe?.implied_volatility,
+          delta: ceGreeks.delta,
+          theta: ceGreeks.theta,
+          bidPrice: rawCe?.top_bid_price,
+          askPrice: rawCe?.top_ask_price,
+        };
+
+        const putContract: OptionContract = {
+          securityId: String(rawPe?.security_id ?? `${indexKey}_${strikePrice}_PE`),
+          tradingSymbol: `${indexKey} ${targetExpiry || ''} ${strikePrice} PE`,
+          symbol: indexKey,
+          strikePrice,
+          optionType: 'PUT',
+          expiryDate: targetExpiry || '',
+          exchangeSegment: idxConfig.exchangeSegment,
+          lotSize: idxConfig.lotSize,
+          ltp: peLtp,
+          previousClose: pePrevClose,
+          change: Number(peChange.toFixed(2)),
+          changePercent: Number(peChangePct.toFixed(2)),
+          oi: peOi,
+          oiChange: peOi - pePrevOi,
+          volume: rawPe?.volume ?? 0,
+          iv: rawPe?.implied_volatility,
+          delta: peGreeks.delta,
+          theta: peGreeks.theta,
+          bidPrice: rawPe?.top_bid_price,
+          askPrice: rawPe?.top_ask_price,
+        };
+
+        strikes.push({
+          strikePrice,
+          call: callContract,
+          put: putContract,
+          isATM: strikePrice === atmStrike,
+        });
+      }
+
+      // Sort by strike price ascending
+      strikes.sort((a, b) => a.strikePrice - b.strikePrice);
+
+      // If no strike was tagged as ATM (rounding edge case), mark the closest one
+      if (!strikes.some((s) => s.isATM) && strikes.length > 0) {
+        let closest = strikes[0];
+        let minDist = Math.abs(closest.strikePrice - underlyingLtp);
+        for (const s of strikes) {
+          const dist = Math.abs(s.strikePrice - underlyingLtp);
+          if (dist < minDist) {
+            closest = s;
+            minDist = dist;
+          }
+        }
+        closest.isATM = true;
+      }
+
+      return {
+        underlying: indexKey,
+        underlyingLtp,
+        expiryDates: expiryDates.length > 0 ? expiryDates : (targetExpiry ? [targetExpiry] : []),
+        selectedExpiry: targetExpiry || '',
+        strikes,
+      };
     } catch {
       // Graceful fallback to mock feed if offline, after hours, or Data API inactive
       return generateMockOptionChain(indexKey);
@@ -335,6 +455,7 @@ export class DhanApiService {
   }
 
   // 6. Positions & Open Orders
+  // DhanHQ v2 /positions may omit `ltp` and `dayPnl`; safely derive them.
   static async getPositions(): Promise<DhanPosition[]> {
     const isDemo = await this.isDemoMode();
     if (isDemo) {
@@ -344,7 +465,44 @@ export class DhanApiService {
     try {
       const client = await this.getClient();
       const res = await client.get('/positions');
-      return Array.isArray(res.data) ? res.data : [];
+      const rawPositions: any[] = Array.isArray(res.data) ? res.data : [];
+
+      return rawPositions.map((p) => {
+        const buyAvg: number = p.buyAvg ?? 0;
+        const buyQty: number = p.buyQty ?? 0;
+        const sellAvg: number = p.sellAvg ?? 0;
+        const sellQty: number = p.sellQty ?? 0;
+        const netQty: number = p.netQty ?? 0;
+        const realizedProfit: number = p.realizedProfit ?? 0;
+        const unrealizedProfit: number = p.unrealizedProfit ?? 0;
+        const costPrice: number = p.costPrice ?? (netQty > 0 ? buyAvg : sellAvg);
+
+        // Safely compute ltp: use raw ltp if present, else derive from costPrice + unrealizedProfit
+        let ltp: number = p.ltp ?? 0;
+        if (!ltp && costPrice && netQty !== 0) {
+          ltp = costPrice + unrealizedProfit / Math.abs(netQty);
+        }
+
+        // Safely compute dayPnl: use raw dayPnl if present, else sum realized + unrealized
+        const dayPnl: number = p.dayPnl ?? (realizedProfit + unrealizedProfit);
+
+        return {
+          securityId: String(p.securityId ?? ''),
+          tradingSymbol: p.tradingSymbol ?? '',
+          exchangeSegment: p.exchangeSegment ?? '',
+          productType: p.productType ?? '',
+          buyQty,
+          buyAvg,
+          sellQty,
+          sellAvg,
+          netQty,
+          realizedProfit,
+          unrealizedProfit,
+          costPrice,
+          ltp,
+          dayPnl,
+        };
+      });
     } catch {
       return demoPositionsStore.map((p) => ({ ...p }));
     }
