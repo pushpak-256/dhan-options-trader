@@ -1,0 +1,78 @@
+name: Deploy Web PWA to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: Export Expo Web PWA
+        env:
+          EXPO_PUBLIC_BASE_URL: /dhan-options-trader
+        run: npx expo export --platform web
+
+      - name: Prepare GitHub Pages PWA Assets
+        run: |
+          if [ -f public/manifest.json ] && [ ! -f dist/manifest.json ]; then
+            cp public/manifest.json dist/manifest.json
+          fi
+          if [ -f assets/icon.png ]; then
+            cp assets/icon.png dist/apple-touch-icon.png
+          fi
+          node -e '
+            const fs = require("fs");
+            let html = fs.readFileSync("dist/index.html", "utf8");
+            const pwaTags = [
+              "<link rel=\"manifest\" href=\"/dhan-options-trader/manifest.json\" />",
+              "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\" />",
+              "<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\" />",
+              "<meta name=\"apple-mobile-web-app-title\" content=\"DhanTrader\" />",
+              "<link rel=\"apple-touch-icon\" href=\"/dhan-options-trader/apple-touch-icon.png\" />"
+            ].join("\n");
+            if (!html.includes("rel=\"manifest\"")) {
+              html = html.replace("</head>", pwaTags + "\n</head>");
+              fs.writeFileSync("dist/index.html", html, "utf8");
+            }
+          '
+          touch dist/.nojekyll
+          cp dist/index.html dist/404.html
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

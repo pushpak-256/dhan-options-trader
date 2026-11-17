@@ -110,12 +110,12 @@ export class StorageService {
     );
   }
 
-  // GitHub Repo (e.g. "pushpak/dhan-options-trader")
+  // GitHub Repo (e.g. "pushpak-256/dhan-options-trader")
   static async getGitHubRepo(): Promise<string> {
     try {
-      return (await AsyncStorage.getItem(KEYS.GITHUB_REPO)) || 'pushpak-bhagat/dhan-options-trader';
+      return (await AsyncStorage.getItem(KEYS.GITHUB_REPO)) || 'pushpak-256/dhan-options-trader';
     } catch {
-      return 'pushpak-bhagat/dhan-options-trader';
+      return 'pushpak-256/dhan-options-trader';
     }
   }
 
