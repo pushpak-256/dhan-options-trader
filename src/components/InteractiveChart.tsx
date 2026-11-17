@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { View, StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, Text, TouchableOpacity, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { CandleData } from '../types/dhan';
 import { calculateVWAP, calculateEMA } from '../utils/indicators';
@@ -214,9 +214,12 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             if (param && param.point) {
               const price = candleSeries.coordinateToPrice(param.point.y);
               if (price) {
-                window.ReactNativeWebView && window.ReactNativeWebView.postMessage(
-                  JSON.stringify({ type: 'PRICE_CLICK', price: Math.round(price * 20) / 20 })
-                );
+                const msg = JSON.stringify({ type: 'PRICE_CLICK', price: Math.round(price * 20) / 20 });
+                if (window.ReactNativeWebView) {
+                  window.ReactNativeWebView.postMessage(msg);
+                } else if (window.parent) {
+                  window.parent.postMessage(msg, '*');
+                }
               }
             }
           });
@@ -231,6 +234,22 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       </body>
     </html>
   `;
+
+  // Listen for web messages from iframe
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const handleWebMessage = (event: MessageEvent) => {
+        try {
+          const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          if (data && data.type === 'PRICE_CLICK' && onPriceSelected) {
+            onPriceSelected(data.price);
+          }
+        } catch {}
+      };
+      window.addEventListener('message', handleWebMessage);
+      return () => window.removeEventListener('message', handleWebMessage);
+    }
+  }, [onPriceSelected]);
 
   const handleMessage = (event: any) => {
     try {
@@ -295,17 +314,30 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </View>
       </View>
 
-      <WebViewComponent
-        ref={webViewRef}
-        originWhitelist={['*']}
-        source={{ html: chartHtml }}
-        style={styles.webview}
-        onMessage={handleMessage}
-        scrollEnabled={false}
-        bounces={false}
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-      />
+      {Platform.OS === 'web' ? (
+        <iframe
+          srcDoc={chartHtml}
+          style={{
+            flex: 1,
+            width: '100%',
+            height: '100%',
+            border: 'none',
+            backgroundColor: '#0F172A',
+          } as any}
+        />
+      ) : (
+        <WebViewComponent
+          ref={webViewRef}
+          originWhitelist={['*']}
+          source={{ html: chartHtml }}
+          style={styles.webview}
+          onMessage={handleMessage}
+          scrollEnabled={false}
+          bounces={false}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+        />
+      )}
 
       {/* Legend & Quick Level Bar */}
       <View style={styles.legendContainer}>
