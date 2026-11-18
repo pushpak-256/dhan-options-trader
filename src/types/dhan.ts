@@ -1,7 +1,15 @@
+export interface DhanAppConfig {
+  clientId: string;
+  appId: string;
+  appSecret: string;
+}
+
 export interface DhanCredentials {
   clientId: string;
   accessToken: string;
   isDemoMode?: boolean;
+  expiryTime?: string;
+  clientName?: string;
 }
 
 export interface DhanProfile {

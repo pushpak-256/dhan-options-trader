@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, SafeAreaView, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Header } from './src/components/Header';
@@ -10,6 +10,7 @@ import { SettingsScreen } from './src/screens/SettingsScreen';
 import { UpdateModal } from './src/components/UpdateModal';
 import { GitHubUpdaterService } from './src/services/githubUpdater';
 import { DhanApiService } from './src/services/dhanApi';
+import { DhanAuthService } from './src/services/dhanAuthService';
 import { StorageService } from './src/services/storage';
 import { AutoSquareOffEngine, KillSwitchEvent } from './src/services/autoSquareOffEngine';
 import { OptionContract } from './src/types/dhan';
@@ -17,6 +18,56 @@ import { UpdateInfo } from './src/types/updater';
 import { generateMockOptionChain } from './src/services/mockData';
 
 type Tab = 'CHART' | 'CHAIN' | 'POSITIONS' | 'COMPLIANCE' | 'SETTINGS';
+
+interface AuthToastState {
+  type: 'success' | 'warning';
+  message: string;
+}
+
+function buildCleanUrlWithoutTokenId(rawHref: string): string {
+  try {
+    const parsed = new URL(rawHref);
+    const keysToDelete: string[] = [];
+    parsed.searchParams.forEach((_, key) => {
+      const lower = key.toLowerCase();
+      if (lower === 'tokenid' || lower === 'token_id') {
+        keysToDelete.push(key);
+      }
+    });
+    keysToDelete.forEach((k) => parsed.searchParams.delete(k));
+
+    if (parsed.hash && /token_?id=/i.test(parsed.hash)) {
+      const hashContent = parsed.hash.replace(/^#/, '');
+      const qIdx = hashContent.indexOf('?');
+      if (qIdx >= 0) {
+        const hashPath = hashContent.slice(0, qIdx);
+        const hashParams = new URLSearchParams(hashContent.slice(qIdx + 1));
+        Array.from(hashParams.keys()).forEach((k) => {
+          const lower = k.toLowerCase();
+          if (lower === 'tokenid' || lower === 'token_id') {
+            hashParams.delete(k);
+          }
+        });
+        const remaining = hashParams.toString();
+        parsed.hash = remaining ? `#${hashPath}?${remaining}` : hashPath ? `#${hashPath}` : '';
+      } else {
+        const hashParams = new URLSearchParams(hashContent);
+        Array.from(hashParams.keys()).forEach((k) => {
+          const lower = k.toLowerCase();
+          if (lower === 'tokenid' || lower === 'token_id') {
+            hashParams.delete(k);
+          }
+        });
+        const remaining = hashParams.toString();
+        parsed.hash = remaining ? `#${remaining}` : '';
+      }
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return typeof window !== 'undefined' ? window.location.pathname || '/' : '/';
+  }
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('CHART');
@@ -32,11 +83,61 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [killSwitchBanner, setKillSwitchBanner] = useState<KillSwitchEvent | null>(null);
+  const [authToast, setAuthToast] = useState<AuthToastState | null>(null);
+  const authToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Initialize, check updates, and start Max SL Auto-Exit Kill Switch monitor
+  const showAuthToast = (toast: AuthToastState, durationMs: number = 5000) => {
+    if (authToastTimerRef.current) {
+      clearTimeout(authToastTimerRef.current);
+      authToastTimerRef.current = null;
+    }
+    setAuthToast(toast);
+    authToastTimerRef.current = setTimeout(() => {
+      setAuthToast(null);
+      authToastTimerRef.current = null;
+    }, durationMs);
+  };
+
+  // Initialize, handle Web OAuth callback, check updates, and start Max SL Auto-Exit Kill Switch monitor
   useEffect(() => {
+    let isMounted = true;
+
+    const handleWebOAuthRedirect = async () => {
+      if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+      const tokenId = DhanAuthService.extractTokenIdFromUrl(window.location.href);
+      if (!tokenId) return;
+
+      // Strip tokenId immediately so refreshing never replays an expired token
+      try {
+        const cleanUrl = buildCleanUrlWithoutTokenId(window.location.href);
+        window.history.replaceState({}, document.title, cleanUrl);
+      } catch {}
+
+      try {
+        const result = await DhanAuthService.consumeConsent(tokenId);
+        if (!isMounted) return;
+        await refreshAccountState();
+        const label = result?.dhanClientName ? ` (${result.dhanClientName})` : '';
+        showAuthToast(
+          {
+            type: 'success',
+            message: `✓ Connected to Dhan via 1-Tap Login!${label}`,
+          },
+          5500
+        );
+      } catch (err: any) {
+        if (!isMounted) return;
+        const rawMsg = err?.message || '';
+        const friendlyMsg = rawMsg
+          ? `⚠️ Dhan 1-Tap Login incomplete: ${rawMsg}`
+          : '⚠️ Dhan App Config not saved yet. Open Account tab, save API Key & Secret, and tap Login with Dhan.';
+        showAuthToast({ type: 'warning', message: friendlyMsg }, 7500);
+      }
+    };
+
     refreshAccountState();
     checkAppUpdates();
+    void handleWebOAuthRedirect();
 
     AutoSquareOffEngine.startMonitoring(3000);
     const unsubPnl = AutoSquareOffEngine.onPnlUpdate((totalPnl) => {
@@ -47,6 +148,11 @@ export default function App() {
     });
 
     return () => {
+      isMounted = false;
+      if (authToastTimerRef.current) {
+        clearTimeout(authToastTimerRef.current);
+        authToastTimerRef.current = null;
+      }
       unsubPnl();
       unsubKill();
       AutoSquareOffEngine.stopMonitoring();
@@ -104,6 +210,35 @@ export default function App() {
           onPressSettings={() => setActiveTab('SETTINGS')}
           activeScreenTitle={getScreenTitle()}
         />
+
+        {/* 1-Tap Dhan OAuth Redirect Toast Banner */}
+        {authToast && (
+          <View
+            style={[
+              styles.authToastBanner,
+              authToast.type === 'success'
+                ? styles.authToastSuccess
+                : styles.authToastWarning,
+            ]}
+          >
+            <Text
+              style={[
+                styles.authToastText,
+                authToast.type === 'success'
+                  ? styles.authToastSuccessText
+                  : styles.authToastWarningText,
+              ]}
+            >
+              {authToast.message}
+            </Text>
+            <TouchableOpacity
+              style={styles.killDismissBtn}
+              onPress={() => setAuthToast(null)}
+            >
+              <Text style={styles.killDismissText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Max Daily SL Auto-Exit Kill Switch Banner */}
         {killSwitchBanner && (
@@ -306,5 +441,33 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '800',
     fontSize: 12,
+  },
+  authToastBanner: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    borderBottomWidth: 2,
+  },
+  authToastSuccess: {
+    backgroundColor: '#064E3B',
+    borderBottomColor: '#10B981',
+  },
+  authToastWarning: {
+    backgroundColor: '#78350F',
+    borderBottomColor: '#F59E0B',
+  },
+  authToastText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  authToastSuccessText: {
+    color: '#D1FAE5',
+  },
+  authToastWarningText: {
+    color: '#FEF3C7',
   },
 });

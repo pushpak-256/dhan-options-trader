@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DhanCredentials } from '../types/dhan';
+import { DhanAppConfig, DhanCredentials } from '../types/dhan';
 import { ComplianceRulesConfig, ComplianceState } from '../types/compliance';
 
 const KEYS = {
   CREDENTIALS: 'dhan_credentials',
+  APP_CONFIG: 'dhan_app_config_v1',
   COMPLIANCE_CONFIG: 'compliance_config_v1',
   COMPLIANCE_STATE: 'compliance_state_v1',
   GITHUB_REPO: 'github_updater_repo',
@@ -62,6 +63,30 @@ export class StorageService {
 
   static async clearCredentials(): Promise<void> {
     await AsyncStorage.removeItem(KEYS.CREDENTIALS);
+  }
+
+  // Dhan OAuth App Config (Client ID + API Key / App ID + API Secret / App Secret)
+  static async getAppConfig(): Promise<DhanAppConfig | null> {
+    try {
+      const data = await AsyncStorage.getItem(KEYS.APP_CONFIG);
+      return data ? JSON.parse(data) : null;
+    } catch (e) {
+      console.error('Failed to load Dhan app config', e);
+      return null;
+    }
+  }
+
+  static async saveAppConfig(config: DhanAppConfig): Promise<void> {
+    const cleaned: DhanAppConfig = {
+      clientId: (config.clientId || '').trim(),
+      appId: (config.appId || '').trim(),
+      appSecret: (config.appSecret || '').trim(),
+    };
+    await AsyncStorage.setItem(KEYS.APP_CONFIG, JSON.stringify(cleaned));
+  }
+
+  static async clearAppConfig(): Promise<void> {
+    await AsyncStorage.removeItem(KEYS.APP_CONFIG);
   }
 
   // Compliance Rules Config

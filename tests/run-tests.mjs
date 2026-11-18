@@ -90,6 +90,22 @@ const axiosMockState = {
 };
 
 const mockAxios = {
+  async get(url, cfg) {
+    axiosMockState.calls.push({ method: 'GET', url, cfg });
+    return axiosMockState.getHandler(url, cfg);
+  },
+  async post(url, body, cfg) {
+    axiosMockState.calls.push({ method: 'POST', url, body, cfg });
+    return axiosMockState.postHandler(url, body, cfg);
+  },
+  async put(url, body, cfg) {
+    axiosMockState.calls.push({ method: 'PUT', url, body, cfg });
+    return axiosMockState.putHandler(url, body, cfg);
+  },
+  async delete(url, cfg) {
+    axiosMockState.calls.push({ method: 'DELETE', url, cfg });
+    return axiosMockState.deleteHandler(url, cfg);
+  },
   create(config) {
     axiosMockState.lastCreateConfig = config;
     return {
@@ -174,6 +190,7 @@ require.extensions['.ts'] = function (mod, filename) {
 // Load real source modules
 const { DhanWebSocketService } = require(path.join(ROOT_DIR, 'src/services/dhanWebSocket.ts'));
 const { DhanApiService, aggregateCandles } = require(path.join(ROOT_DIR, 'src/services/dhanApi.ts'));
+const { DhanAuthService } = require(path.join(ROOT_DIR, 'src/services/dhanAuthService.ts'));
 const { generateMockCandles, TIMEFRAME_SECONDS } = require(path.join(ROOT_DIR, 'src/services/mockData.ts'));
 const { StorageService, DEFAULT_COMPLIANCE_CONFIG, DEFAULT_COMPLIANCE_STATE } = require(
   path.join(ROOT_DIR, 'src/services/storage.ts')
@@ -1704,9 +1721,167 @@ await test('ChartOrderPanel & ChartTradingScreen wire editable Entry/SL/TP input
 });
 
 // ============================================================================
-// SUITE G: Live Local App Verification (http://localhost:8081 or Static Export)
+// SUITE G: DhanHQ 1-Tap OAuth Consent Service (v1.0.3)
 // ============================================================================
-suite('G. Live Local App Verification (Web Bundle + Headless Chromium E2E)');
+suite('G. DhanHQ 1-Tap OAuth Consent Service (DhanAuthService)');
+
+await test('DhanAuthService.extractTokenIdFromUrl handles query, multi-param, encoded, hash, custom scheme, missing & malformed URLs', () => {
+  // Standard query param
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl(
+      'https://pushpak-256.github.io/dhan-options-trader/?tokenId=tok_abc123'
+    ),
+    'tok_abc123'
+  );
+  // Multi-param URL + case-insensitive key
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl(
+      'https://example.com/callback?foo=1&token_id=multi_tok_99&bar=2'
+    ),
+    'multi_tok_99'
+  );
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('https://example.com/cb?TOKENID=UPPER_77'),
+    'UPPER_77'
+  );
+  // Encoded characters
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('https://example.com/cb?tokenId=abc%2B123%3D%3D'),
+    'abc+123=='
+  );
+  // Hash fragments
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('https://example.com/#/auth?tokenId=hash_q_42'),
+    'hash_q_42'
+  );
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('https://example.com/#tokenId=hash_direct_88'),
+    'hash_direct_88'
+  );
+  // Custom mobile deep-link scheme
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('dhantrader://auth?tokenId=abc'),
+    'abc'
+  );
+  // Missing param -> null
+  assert.equal(
+    DhanAuthService.extractTokenIdFromUrl('https://pushpak-256.github.io/dhan-options-trader/?foo=bar'),
+    null
+  );
+  // Malformed / empty URLs -> null with zero throws
+  assert.equal(DhanAuthService.extractTokenIdFromUrl('not a valid ::: url ///'), null);
+  assert.equal(DhanAuthService.extractTokenIdFromUrl(''), null);
+  assert.equal(DhanAuthService.extractTokenIdFromUrl(null), null);
+  assert.equal(DhanAuthService.extractTokenIdFromUrl(undefined), null);
+});
+
+await test('DhanAuthService.generateConsent & consumeConsent use exact URLs/headers and persist live credentials', async () => {
+  mockAsyncStorage._reset();
+  axiosMockState.reset();
+
+  await StorageService.saveAppConfig({
+    clientId: '1100998877',
+    appId: 'dhan-app-id-123',
+    appSecret: 'dhan-secret-xyz',
+  });
+  const savedCfg = await StorageService.getAppConfig();
+  assert.deepEqual(savedCfg, {
+    clientId: '1100998877',
+    appId: 'dhan-app-id-123',
+    appSecret: 'dhan-secret-xyz',
+  });
+
+  const futureExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+  axiosMockState.postHandler = async (url, _body, cfg) => {
+    if (url.includes('/app/generate-consent')) {
+      assert.equal(
+        url,
+        'https://auth.dhan.co/app/generate-consent?client_id=1100998877'
+      );
+      assert.equal(cfg?.headers?.app_id, 'dhan-app-id-123');
+      assert.equal(cfg?.headers?.app_secret, 'dhan-secret-xyz');
+      return {
+        data: {
+          consentAppId: 'consent_xyz_789',
+          consentAppStatus: 'GENERATED',
+        },
+      };
+    }
+    if (url.includes('/app/consumeApp-consent')) {
+      assert.equal(
+        url,
+        'https://auth.dhan.co/app/consumeApp-consent?tokenId=tok_live_456'
+      );
+      assert.equal(cfg?.headers?.app_id, 'dhan-app-id-123');
+      assert.equal(cfg?.headers?.app_secret, 'dhan-secret-xyz');
+      return {
+        data: {
+          dhanClientId: '1100998877',
+          dhanClientName: 'Pushpak Trader',
+          accessToken: 'jwt_live_token_999',
+          expiryTime: futureExpiry,
+        },
+      };
+    }
+    throw new Error(`Unexpected auth POST ${url}`);
+  };
+
+  // Step 1: generateConsent
+  const gen = await DhanAuthService.generateConsent();
+  assert.equal(gen.consentAppId, 'consent_xyz_789');
+  assert.equal(
+    gen.loginUrl,
+    'https://auth.dhan.co/login/consentApp-login?consentAppId=consent_xyz_789'
+  );
+
+  // Step 2: consumeConsent -> persists accessToken + expiryTime with isDemoMode: false
+  const consumed = await DhanAuthService.consumeConsent('tok_live_456');
+  assert.equal(consumed.dhanClientId, '1100998877');
+  assert.equal(consumed.dhanClientName, 'Pushpak Trader');
+  assert.equal(consumed.accessToken, 'jwt_live_token_999');
+  assert.equal(consumed.expiryTime, futureExpiry);
+
+  const persisted = await StorageService.getCredentials();
+  assert.ok(persisted, 'consumeConsent must persist credentials to StorageService');
+  assert.equal(persisted.clientId, '1100998877');
+  assert.equal(persisted.accessToken, 'jwt_live_token_999');
+  assert.equal(persisted.expiryTime, futureExpiry);
+  assert.equal(persisted.clientName, 'Pushpak Trader');
+  assert.equal(persisted.isDemoMode, false);
+});
+
+await test('DhanAuthService.isSessionValid validates future, past, Dhan space-format, and missing dates', () => {
+  const futureIso = new Date(Date.now() + 3600 * 1000).toISOString();
+  const pastIso = new Date(Date.now() - 3600 * 1000).toISOString();
+  assert.equal(DhanAuthService.isSessionValid(futureIso), true);
+  assert.equal(DhanAuthService.isSessionValid('2099-12-31 15:30:00'), true);
+  assert.equal(DhanAuthService.isSessionValid(pastIso), false);
+  assert.equal(DhanAuthService.isSessionValid('2020-01-01 09:15:00'), false);
+  assert.equal(DhanAuthService.isSessionValid(undefined), false);
+  assert.equal(DhanAuthService.isSessionValid(''), false);
+  assert.equal(DhanAuthService.isSessionValid('not-a-date'), false);
+});
+
+await test('App.tsx OAuth redirect handler & Netlify auth CORS proxy are wired cleanly', () => {
+  const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'App.tsx'), 'utf8');
+  assert.ok(appSrc.includes('extractTokenIdFromUrl'), 'App.tsx must extract tokenId on web mount');
+  assert.ok(appSrc.includes('replaceState'), 'App.tsx must strip tokenId from URL via history.replaceState');
+  assert.ok(appSrc.includes('consumeConsent'), 'App.tsx must call DhanAuthService.consumeConsent');
+
+  const netlifyToml = fs.readFileSync(path.join(ROOT_DIR, 'netlify.toml'), 'utf8');
+  assert.ok(netlifyToml.includes('/api/dhan-auth/*'), 'netlify.toml must map /api/dhan-auth/* redirect');
+
+  const proxySrc = fs.readFileSync(path.join(ROOT_DIR, 'netlify/functions/dhan-proxy.js'), 'utf8');
+  assert.ok(proxySrc.includes('https://auth.dhan.co'), 'dhan-proxy.js must forward auth requests to https://auth.dhan.co');
+  assert.ok(proxySrc.includes('app_id') && proxySrc.includes('app_secret'), 'dhan-proxy.js must allow & forward app_id and app_secret headers');
+  assert.doesNotThrow(() => new Function(proxySrc), 'netlify/functions/dhan-proxy.js must have zero JS syntax errors');
+});
+
+// ============================================================================
+// SUITE H: Live Local App Verification (http://localhost:8081 or Static Export)
+// ============================================================================
+suite('H. Live Local App Verification (Web Bundle + Headless Chromium E2E)');
 
 let APP_URL = process.env.TEST_APP_URL || 'http://localhost:8081';
 let staticServer = null;
@@ -2111,6 +2286,55 @@ await test('Headless Chromium renders http://localhost:8081 with real DOM conten
     assert.ok(
       chainText.includes('LIVE WS') && chainText.includes('STRIKE'),
       `Option Chain tab did not render LIVE WS / STRIKE table cleanly. Preview: ${chainText.slice(0, 250)}`
+    );
+
+    // Navigate to Account tab and verify both ⚡ 1-Tap Dhan Login (default) & 🔑 Manual JWT Token tabs render cleanly
+    await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const nodes = Array.from(document.querySelectorAll('div, span, button'));
+        const accountBtn = nodes.find((el) => el.childElementCount === 0 && el.textContent && el.textContent.trim() === 'Account');
+        if (accountBtn) accountBtn.click();
+      })()`,
+      returnByValue: true,
+    });
+    let accountText = '';
+    for (let i = 0; i < 15; i++) {
+      const res = await cdp('Runtime.evaluate', {
+        expression: 'document.body ? document.body.innerText : ""',
+        returnByValue: true,
+      });
+      accountText = String(res?.result?.value || '');
+      if (accountText.includes('1-Tap Dhan Login') && accountText.includes('Login with Dhan')) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    assert.ok(
+      accountText.includes('1-Tap Dhan Login') &&
+        accountText.includes('Manual JWT Token') &&
+        accountText.includes('Client ID') &&
+        accountText.includes('API Key') &&
+        accountText.includes('API Secret') &&
+        accountText.includes('Login with Dhan'),
+      `Account tab default 1-Tap Dhan Login UI incomplete. Preview: ${accountText.slice(0, 350)}`
+    );
+
+    // Switch to 🔑 Manual JWT Token tab and verify it renders cleanly
+    await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const nodes = Array.from(document.querySelectorAll('div, span, button'));
+        const jwtTab = nodes.find((el) => el.childElementCount === 0 && el.textContent && el.textContent.trim().includes('Manual JWT Token'));
+        if (jwtTab) jwtTab.click();
+      })()`,
+      returnByValue: true,
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    const jwtTextRes = await cdp('Runtime.evaluate', {
+      expression: 'document.body ? document.body.innerText : ""',
+      returnByValue: true,
+    });
+    const jwtText = String(jwtTextRes?.result?.value || '');
+    assert.ok(
+      jwtText.includes('Access Token') && jwtText.includes('Client ID'),
+      `Manual JWT Token tab did not render expected form fields. Preview: ${jwtText.slice(0, 300)}`
     );
 
     assert.deepEqual(

@@ -1,6 +1,6 @@
 {
   "name": "dhan-options-trader",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~58.0.17",

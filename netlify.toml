@@ -4,6 +4,11 @@
   functions = "netlify/functions"
 
 [[redirects]]
+  from = "/api/dhan-auth/*"
+  to = "/.netlify/functions/dhan-proxy/auth/:splat"
+  status = 200
+
+[[redirects]]
   from = "/api/dhan/*"
   to = "/.netlify/functions/dhan-proxy/:splat"
   status = 200
