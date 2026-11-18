@@ -232,6 +232,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         height: 100%;
         background-color: #0F172A;
         overflow: hidden;
+        touch-action: none;
+        overscroll-behavior: none;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
       #app {
@@ -240,6 +242,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         display: flex;
         flex-direction: row;
         background: #0F172A;
+        touch-action: none;
+        overscroll-behavior: none;
       }
       /* TradingView-style Left Vertical Drawing Rail */
       #drawRail {
@@ -328,12 +332,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         height: 100%;
         position: relative;
         overflow: hidden;
+        touch-action: none;
+        overscroll-behavior: none;
       }
       #klineContainer {
         width: 100%;
         height: 100%;
         position: absolute;
         inset: 0;
+        touch-action: none;
+        overscroll-behavior: none;
       }
       #overlayCanvas {
         width: 100%;
@@ -348,17 +356,19 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         top: 5px;
         left: 6px;
         z-index: 25;
+        height: 22px;
         display: flex;
         align-items: center;
         gap: 6px;
         background: rgba(15, 23, 42, 0.86);
-        padding: 3px 8px;
+        padding: 0 8px;
         border-radius: 6px;
         border: 1px solid rgba(148, 163, 184, 0.18);
         pointer-events: none;
         max-width: calc(100% - 210px);
         overflow: hidden;
         white-space: nowrap;
+        font-variant-numeric: tabular-nums;
       }
       .symbol-text {
         color: #F8FAFC;
@@ -372,6 +382,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         font-weight: 800;
         font-size: 11px;
         flex-shrink: 0;
+        font-variant-numeric: tabular-nums;
         transition: color 0.15s;
       }
       .ltp-up { color: #34D399 !important; }
@@ -384,6 +395,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         display: flex;
         gap: 5px;
         align-items: center;
+        font-variant-numeric: tabular-nums;
       }
       .qbtn {
         border: none;
@@ -414,16 +426,39 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         border-radius: 4px;
         border: 1px solid rgba(148, 163, 184, 0.22);
         pointer-events: none;
-        max-width: calc(100% - 112px);
+        max-width: calc(100% - 166px);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .floating-reset-btn {
+      .floating-axis-controls {
         position: absolute;
         bottom: 28px;
         right: 66px;
         z-index: 30;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .auto-y-btn {
+        height: 24px;
+        padding: 0 6px;
+        border-radius: 5px;
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        background: rgba(15, 23, 42, 0.9);
+        color: #38BDF8;
+        font-size: 9px;
+        font-weight: 800;
+        cursor: pointer;
+        white-space: nowrap;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+      }
+      .auto-y-btn.manual {
+        border-color: rgba(245, 158, 11, 0.7);
+        background: rgba(245, 158, 11, 0.18);
+        color: #FBBF24;
+      }
+      .floating-reset-btn {
         width: 26px;
         height: 24px;
         border-radius: 5px;
@@ -438,17 +473,19 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         cursor: pointer;
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
       }
-      .floating-reset-btn:hover { background: #1E293B; color: #7DD3FC; }
-      .floating-reset-btn:active { transform: scale(0.92); }
+      .floating-reset-btn:hover, .auto-y-btn:hover { background: #1E293B; color: #7DD3FC; }
+      .floating-reset-btn:active, .auto-y-btn:active { transform: scale(0.92); }
       @media (max-width: 440px) {
         #drawRail { width: 32px; padding: 3px 1px; gap: 2px; }
         .rail-btn { width: 26px; height: 25px; font-size: 12px; }
-        .chart-header { padding: 2px 6px; gap: 4px; max-width: calc(100% - 178px); }
+        .chart-header { height: 20px; padding: 0 6px; gap: 4px; max-width: calc(100% - 178px); }
         .symbol-text, .ltp-text { font-size: 10px; }
         .quick-order-bar { right: 56px; gap: 3px; }
         .qbtn { padding: 3px 6px; font-size: 9px; letter-spacing: 0.1px; }
-        .hint-pill { font-size: 9px; padding: 2px 6px; bottom: 26px; max-width: calc(100% - 96px); }
-        .floating-reset-btn { bottom: 26px; right: 58px; width: 24px; height: 22px; font-size: 12px; }
+        .hint-pill { font-size: 9px; padding: 2px 6px; bottom: 26px; max-width: calc(100% - 146px); }
+        .floating-axis-controls { bottom: 26px; right: 58px; gap: 3px; }
+        .auto-y-btn { height: 22px; padding: 0 5px; font-size: 8.5px; }
+        .floating-reset-btn { width: 24px; height: 22px; font-size: 12px; }
       }
     </style>
   </head>
@@ -487,8 +524,11 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           <button class="qbtn qbtn-exit" id="btnQuickExit" style="display:none;">✕ EXIT</button>
         </div>
 
-        <div class="hint-pill" id="hintPill">✛ Drag ENTRY / SL / TP handles or pick a drawing tool</div>
-        <button class="floating-reset-btn" id="btnResetChart" title="Auto-fit & Reset Chart View">⟲</button>
+        <div class="hint-pill" id="hintPill">✛ Drag pills to adjust TP/SL, drag chart to pan X & Y</div>
+        <div class="floating-axis-controls">
+          <button class="auto-y-btn" id="btnAutoY" title="Toggle Auto Y-Axis Scale">Auto Y</button>
+          <button class="floating-reset-btn" id="btnResetChart" title="Auto-fit & Reset Chart View">⟲</button>
+        </div>
       </div>
     </div>
 
@@ -502,6 +542,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       const btnQuickBuy = document.getElementById('btnQuickBuy');
       const btnQuickSell = document.getElementById('btnQuickSell');
       const btnQuickExit = document.getElementById('btnQuickExit');
+      const btnAutoY = document.getElementById('btnAutoY');
       const btnResetChart = document.getElementById('btnResetChart');
       const drawBadge = document.getElementById('drawBadge');
 
@@ -1332,49 +1373,94 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         ctx.restore();
       }
 
-      // Hit-test draggable TP/ENTRY/SL pill handles (priority) or lines (excludes ENTRY in MARKET mode)
+      // Access KLineChart v9's candle_pane Y-axis for true 2-axis (X + Y) panning & mobile Y-scale
+      let autoYEnabled = true;
+
+      function getCandleYAxis() {
+        try {
+          const pane =
+            typeof chart.getDrawPaneById === 'function'
+              ? chart.getDrawPaneById('candle_pane')
+              : null;
+          return pane && typeof pane.getAxisComponent === 'function'
+            ? pane.getAxisComponent()
+            : null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function setAutoYIndicator(isAuto) {
+        autoYEnabled = !!isAuto;
+        if (btnAutoY) {
+          btnAutoY.textContent = autoYEnabled ? 'Auto Y' : 'Free Y';
+          btnAutoY.classList.toggle('manual', !autoYEnabled);
+        }
+      }
+
+      function applyYAxisRange(yAxis, newFrom, newTo) {
+        if (!yAxis || !isFinite(newFrom) || !isFinite(newTo) || newTo <= newFrom) return;
+        const newRealFrom =
+          typeof yAxis.convertToRealValue === 'function'
+            ? yAxis.convertToRealValue(newFrom)
+            : newFrom;
+        const newRealTo =
+          typeof yAxis.convertToRealValue === 'function'
+            ? yAxis.convertToRealValue(newTo)
+            : newTo;
+        yAxis.setRange({
+          from: newFrom,
+          to: newTo,
+          range: newTo - newFrom,
+          realFrom: newRealFrom,
+          realTo: newRealTo,
+          realRange: newRealTo - newRealFrom,
+        });
+        if (typeof chart.adjustPaneViewport === 'function') {
+          chart.adjustPaneViewport(false, true, true, true);
+        }
+        setAutoYIndicator(false);
+        drawOverlay();
+      }
+
+      function lockAutoYAxis() {
+        try {
+          const yAxis = getCandleYAxis();
+          if (yAxis && typeof yAxis.setAutoCalcTickFlag === 'function') {
+            yAxis.setAutoCalcTickFlag(true);
+          }
+          if (typeof chart.adjustPaneViewport === 'function') {
+            chart.adjustPaneViewport(false, true, true, true);
+          }
+        } catch (e) {}
+        setAutoYIndicator(true);
+        drawOverlay();
+      }
+
+      // Hit-test STRICTLY inside rendered TP / ENTRY / SL pill handle boxes (never full-width!)
+      // Touching anywhere else on candles passes straight through to 2-axis chart panning/zooming.
       function hitTestOrderHandle(xClick, yClick) {
         const { plotW, plotH } = getCandleBounds();
         if (xClick > plotW || yClick < 0 || yClick > plotH) return null;
 
         const isMarket = state.orderType === 'MARKET';
-
-        // 1. Check direct hit on pill handles (generous 6px touch pad)
-        const PAD = 6;
+        const PAD_X = 8;
+        const PAD_Y = 10;
         const keys = isMarket ? ['TP', 'SL'] : ['TP', 'SL', 'ENTRY'];
         for (let i = 0; i < keys.length; i++) {
           const k = keys[i];
           const rect = renderedPills[k];
           if (
             rect &&
-            xClick >= rect.x - PAD &&
-            xClick <= rect.x + rect.w + PAD &&
-            yClick >= rect.y - PAD &&
-            yClick <= rect.y + rect.h + PAD
+            xClick >= rect.x - PAD_X &&
+            xClick <= rect.x + rect.w + PAD_X &&
+            yClick >= rect.y - PAD_Y &&
+            yClick <= rect.y + rect.h + PAD_Y
           ) {
             return { type: k };
           }
         }
-
-        // 2. Check proximity to horizontal lines when no overlay is actively selected
-        if (selectedOverlayId) return null;
-        const TOL = 14;
-        const candidates = [];
-        const yTP = priceToY(state.tp);
-        const ySL = priceToY(state.sl);
-        const yEntry = isMarket ? null : priceToY(state.entry);
-        if (yTP !== null && yTP >= 2 && yTP <= plotH - 2 && Math.abs(yTP - yClick) <= TOL) {
-          candidates.push({ type: 'TP', dist: Math.abs(yTP - yClick) });
-        }
-        if (ySL !== null && ySL >= 2 && ySL <= plotH - 2 && Math.abs(ySL - yClick) <= TOL) {
-          candidates.push({ type: 'SL', dist: Math.abs(ySL - yClick) });
-        }
-        if (!isMarket && yEntry !== null && yEntry >= 2 && yEntry <= plotH - 2 && Math.abs(yEntry - yClick) <= TOL) {
-          candidates.push({ type: 'ENTRY', dist: Math.abs(yEntry - yClick) });
-        }
-
-        candidates.sort((a, b) => a.dist - b.dist);
-        return candidates.length > 0 ? { type: candidates[0].type } : null;
+        return null;
       }
 
       function getCoords(e) {
@@ -1384,21 +1470,36 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         return { x: clientX - rect.left, y: clientY - rect.top };
       }
 
+      let yAxisScaleState = null; // { startY, startRange }
+      let verticalPanState = null; // { startX, startY, startRange, isTouch, unlocked }
+
       function onPointerDown(e) {
         if (
           e.target &&
           e.target.closest &&
-          (e.target.closest('.quick-order-bar') || e.target.closest('.floating-reset-btn'))
+          (e.target.closest('.quick-order-bar') || e.target.closest('.floating-axis-controls'))
         ) {
+          return;
+        }
+        // Let 2-finger pinch zoom pass 100% natively to KLineChart
+        if (e.touches && e.touches.length >= 2) {
+          draggingTarget = null;
+          yAxisScaleState = null;
+          verticalPanState = null;
           return;
         }
         // Let KLineChart handle 100% of clicks while actively placing a drawing tool
         if (activeDrawTool !== 'POINTER') return;
 
         const pos = getCoords(e);
+        const { plotW, plotH } = getCandleBounds();
+
+        // 1. Direct pill-box hit -> drag Entry / SL / TP handle
         const hit = hitTestOrderHandle(pos.x, pos.y);
         if (hit) {
           draggingTarget = hit;
+          yAxisScaleState = null;
+          verticalPanState = null;
           try {
             chart.setScrollEnabled(false);
             chart.setZoomEnabled(false);
@@ -1406,36 +1507,120 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           if (e.cancelable) e.preventDefault();
           e.stopPropagation();
           drawOverlay();
+          return;
         }
-      }
 
-      function onPointerMove(e) {
-        const pos = getCoords(e);
-        if (!draggingTarget) {
-          if (activeDrawTool === 'POINTER') {
-            const hit = hitTestOrderHandle(pos.x, pos.y);
-            klineContainer.style.cursor = hit ? 'ns-resize' : 'crosshair';
-          } else {
-            klineContainer.style.cursor = 'crosshair';
+        // 2. Right price axis drag -> smooth Y-axis scale/zoom on BOTH mobile touch & desktop mouse
+        if (pos.x > plotW && pos.y >= 0 && pos.y <= plotH) {
+          const yAxis = getCandleYAxis();
+          const curRange = yAxis && typeof yAxis.getRange === 'function' ? yAxis.getRange() : null;
+          if (curRange && curRange.range > 0) {
+            yAxisScaleState = {
+              startY: pos.y,
+              startRange: { from: curRange.from, to: curRange.to, range: curRange.range },
+            };
+            if (e.cancelable) e.preventDefault();
+            e.stopPropagation();
           }
           return;
         }
 
-        if (e.cancelable) e.preventDefault();
-        e.stopPropagation();
-        const price = yToPrice(pos.y);
-        if (!price) return;
-        const snapped = roundTick(price);
+        // 3. Candle area drag -> smooth 2-axis (X + Y) pan (does NOT block KLineChart's X pan!)
+        if (pos.x <= plotW && pos.y >= 0 && pos.y <= plotH && !selectedOverlayId) {
+          const yAxis = getCandleYAxis();
+          const curRange = yAxis && typeof yAxis.getRange === 'function' ? yAxis.getRange() : null;
+          if (curRange && curRange.range > 0) {
+            verticalPanState = {
+              startX: pos.x,
+              startY: pos.y,
+              startRange: { from: curRange.from, to: curRange.to, range: curRange.range },
+              isTouch: !!(e.touches && e.touches.length > 0),
+              unlocked: !autoYEnabled,
+            };
+          }
+        }
+      }
 
-        if (draggingTarget.type === 'ENTRY') state.entry = snapped;
-        else if (draggingTarget.type === 'SL') state.sl = snapped;
-        else if (draggingTarget.type === 'TP') state.tp = snapped;
+      function onPointerMove(e) {
+        if (e.touches && e.touches.length >= 2) {
+          yAxisScaleState = null;
+          verticalPanState = null;
+          return;
+        }
 
-        updateQuickOrderButtons();
-        drawOverlay();
+        const pos = getCoords(e);
+
+        // A. Active TP / ENTRY / SL pill handle drag
+        if (draggingTarget) {
+          if (e.cancelable) e.preventDefault();
+          e.stopPropagation();
+          const price = yToPrice(pos.y);
+          if (!price) return;
+          const snapped = roundTick(price);
+
+          if (draggingTarget.type === 'ENTRY') state.entry = snapped;
+          else if (draggingTarget.type === 'SL') state.sl = snapped;
+          else if (draggingTarget.type === 'TP') state.tp = snapped;
+
+          updateQuickOrderButtons();
+          drawOverlay();
+          return;
+        }
+
+        // B. Right Y-axis vertical zoom/scale drag (works smoothly on mobile touch & mouse)
+        if (yAxisScaleState) {
+          if (e.cancelable) e.preventDefault();
+          e.stopPropagation();
+          const yAxis = getCandleYAxis();
+          if (yAxis) {
+            const dy = pos.y - yAxisScaleState.startY;
+            const scale = Math.max(0.15, Math.min(8.0, Math.exp(dy * 0.008)));
+            const sr = yAxisScaleState.startRange;
+            const newRange = sr.range * scale;
+            const halfDiff = (newRange - sr.range) / 2;
+            applyYAxisRange(yAxis, sr.from - halfDiff, sr.to + halfDiff);
+          }
+          return;
+        }
+
+        // C. Candle area vertical pan alongside native X-axis scroll (2-axis pan!)
+        if (verticalPanState) {
+          const dy = pos.y - verticalPanState.startY;
+          if (!verticalPanState.unlocked && Math.abs(dy) >= 6) {
+            verticalPanState.unlocked = true;
+          }
+          if (verticalPanState.unlocked) {
+            if (verticalPanState.isTouch && e.cancelable) {
+              e.preventDefault();
+            }
+            const yAxis = getCandleYAxis();
+            const { plotH } = getCandleBounds();
+            if (yAxis) {
+              const sr = verticalPanState.startRange;
+              const difRange = sr.range * (dy / Math.max(80, plotH));
+              applyYAxisRange(yAxis, sr.from + difRange, sr.to + difRange);
+            }
+          }
+          return;
+        }
+
+        // Hover cursor feedback on desktop
+        if (activeDrawTool === 'POINTER') {
+          const { plotW, plotH } = getCandleBounds();
+          if (pos.x > plotW && pos.y >= 0 && pos.y <= plotH) {
+            klineContainer.style.cursor = 'ns-resize';
+          } else {
+            const hit = hitTestOrderHandle(pos.x, pos.y);
+            klineContainer.style.cursor = hit ? 'ns-resize' : 'grab';
+          }
+        } else {
+          klineContainer.style.cursor = 'crosshair';
+        }
       }
 
       function onPointerUp() {
+        yAxisScaleState = null;
+        verticalPanState = null;
         if (!draggingTarget) return;
         const finished = draggingTarget;
         draggingTarget = null;
@@ -1451,7 +1636,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         drawOverlay();
       }
 
-      // Capture phase on chartArea so dragging order handles smoothly beats chart pan
+      // Capture phase on chartArea so pill drags & Y-axis scaling work cleanly without breaking X pan/pinch
       chartArea.addEventListener('mousedown', onPointerDown, true);
       window.addEventListener('mousemove', onPointerMove, true);
       window.addEventListener('mouseup', onPointerUp, true);
@@ -1459,6 +1644,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       chartArea.addEventListener('touchstart', onPointerDown, { passive: false, capture: true });
       window.addEventListener('touchmove', onPointerMove, { passive: false, capture: true });
       window.addEventListener('touchend', onPointerUp, true);
+      window.addEventListener('touchcancel', onPointerUp, true);
 
       // Quick Buy / Sell / Exit buttons directly on chart
       btnQuickBuy.addEventListener('click', (e) => {
@@ -1563,6 +1749,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
       function resetChartView() {
         try {
+          const yAxis = getCandleYAxis();
+          if (yAxis && typeof yAxis.setAutoCalcTickFlag === 'function') {
+            yAxis.setAutoCalcTickFlag(true);
+          }
           chart.setBarSpace(9);
           chart.setOffsetRightDistance(56);
           chart.setPriceVolumePrecision(2, 0);
@@ -1572,11 +1762,23 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             axisOptions: { name: 'default', scrollZoomEnabled: true },
           });
           chart.scrollToRealTime(150);
+          if (typeof chart.adjustPaneViewport === 'function') {
+            chart.adjustPaneViewport(false, true, true, true);
+          }
           chart.resize();
         } catch (err) {}
-        hintPill.textContent = '⟲ Chart zoom & Y-axis reset to live candles';
+        setAutoYIndicator(true);
+        hintPill.textContent = '⟲ Chart zoom & Auto-Y reset to live candles';
         drawOverlay();
         setTimeout(() => drawOverlay(), 180);
+      }
+
+      if (btnAutoY) {
+        btnAutoY.addEventListener('click', (e) => {
+          e.stopPropagation();
+          lockAutoYAxis();
+          hintPill.textContent = 'Auto Y-Axis re-locked to visible candles';
+        });
       }
 
       if (btnResetChart) {
@@ -1837,17 +2039,22 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         />
       )}
 
-      {/* Legend & Quick Level Bar */}
+      {/* Legend & Quick Level Bar (Strict fixed height to prevent vertical layout wobble) */}
       <View style={styles.legendContainer}>
         <View style={styles.legendItem}>
           {orderType === 'MARKET' ? (
-            <Text style={[styles.legendText, { color: '#FBBF24' }]}>
+            <Text
+              numberOfLines={1}
+              style={[styles.legendText, { color: '#FBBF24' }]}
+            >
               MKT @ ₹{entryPrice.toFixed(1)}
             </Text>
           ) : (
             <>
               <View style={[styles.dot, { backgroundColor: '#38BDF8' }]} />
-              <Text style={styles.legendText}>Entry: ₹{entryPrice.toFixed(1)}</Text>
+              <Text numberOfLines={1} style={styles.legendText}>
+                Entry: ₹{entryPrice.toFixed(1)}
+              </Text>
             </>
           )}
         </View>
@@ -1860,13 +2067,14 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               ]}
             />
             <Text
+              numberOfLines={1}
               style={[
                 styles.legendText,
                 { color: isSlInverted ? '#FBBF24' : '#F87171' },
               ]}
             >
               {isSlInverted
-                ? `⚠️ SL ${transactionType === 'BUY' ? (stopLossPrice > entryPrice ? '>' : '=') : (stopLossPrice < entryPrice ? '<' : '=')} ENTRY (₹${stopLossPrice.toFixed(1)})`
+                ? `⚠️ SL ${transactionType === 'BUY' ? (stopLossPrice > entryPrice ? '>' : '=') : (stopLossPrice < entryPrice ? '<' : '=')} ENTRY`
                 : `SL: ₹${stopLossPrice.toFixed(1)} (-₹${Math.round(slRiskRupees)})`}
             </Text>
           </View>
@@ -1880,13 +2088,14 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               ]}
             />
             <Text
+              numberOfLines={1}
               style={[
                 styles.legendText,
                 { color: isTpInverted ? '#FBBF24' : '#34D399' },
               ]}
             >
               {isTpInverted
-                ? `⚠️ TP ${transactionType === 'BUY' ? (targetPrice < entryPrice ? '<' : '=') : (targetPrice > entryPrice ? '>' : '=')} ENTRY (₹${targetPrice.toFixed(1)})`
+                ? `⚠️ TP ${transactionType === 'BUY' ? (targetPrice < entryPrice ? '<' : '=') : (targetPrice > entryPrice ? '>' : '=')} ENTRY`
                 : `TP: ₹${targetPrice.toFixed(1)} (+₹${Math.round(tpRewardRupees)}${rrRatio !== '-' ? ` | 1:${rrRatio}` : ''})`}
             </Text>
           </View>
@@ -2051,12 +2260,13 @@ const styles = StyleSheet.create({
   },
   legendContainer: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
     alignItems: 'center',
     justifyContent: 'space-around',
+    height: 28,
+    overflow: 'hidden',
     backgroundColor: '#1E293B',
-    paddingVertical: 5,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     gap: 6,
     borderTopWidth: 1,
     borderTopColor: '#334155',
@@ -2065,15 +2275,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    flexShrink: 1,
+    minWidth: 0,
   },
   dot: {
-    width: 8,
-    height: 8,
+    width: 7,
+    height: 7,
     borderRadius: 4,
+    flexShrink: 0,
   },
   legendText: {
     color: '#E2E8F0',
     fontSize: 10,
     fontWeight: '600',
+    fontVariant: ['tabular-nums'],
   },
 });

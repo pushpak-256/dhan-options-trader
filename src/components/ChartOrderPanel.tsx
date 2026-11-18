@@ -68,6 +68,7 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
   oneClickMode = false,
   onToggleOneClickMode,
 }) => {
+  const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const [focusedField, setFocusedField] = useState<'ENTRY' | 'SL' | 'TP' | null>(null);
   const [entryText, setEntryText] = useState<string>(formatPriceText(entryPrice));
   const [slText, setSlText] = useState<string>(formatPriceText(stopLossPrice));
@@ -184,8 +185,90 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
     setActiveLineType('TP');
   };
 
+  const handleMinimizedAction = (side: TransactionType) => {
+    if (!validation.allowed || isSubmitting) return;
+    if (side === transactionType) {
+      onPlaceOrder();
+    } else {
+      setTransactionType(side);
+    }
+  };
+
+  if (isMinimized) {
+    return (
+      <View style={styles.minimizedContainer}>
+        <TouchableOpacity
+          style={styles.expandHandleBtn}
+          onPress={() => setIsMinimized(false)}
+          accessibilityLabel="Expand Order Ticket"
+        >
+          <Text numberOfLines={1} style={styles.expandHandleText}>
+            ⌃ Ticket
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.minMetaGroup}>
+          <View style={styles.minBadge}>
+            <Text numberOfLines={1} style={styles.minBadgeText}>
+              {lots}L • {isMarketOrder ? 'MKT' : 'LMT'}
+            </Text>
+          </View>
+          <View style={styles.minSlTpPill}>
+            <Text numberOfLines={1} style={styles.minSlTpText}>
+              SL {stopLossPrice ? formatPriceText(stopLossPrice) : '-'} / TP{' '}
+              {targetPrice ? formatPriceText(targetPrice) : '-'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.minActionGroup}>
+          <TouchableOpacity
+            style={[
+              styles.minQuickBtn,
+              styles.buyActiveBtn,
+              transactionType === 'BUY' && styles.minQuickBtnArmed,
+              (!validation.allowed || isSubmitting) && styles.disabledBtn,
+            ]}
+            onPress={() => handleMinimizedAction('BUY')}
+            disabled={!validation.allowed || isSubmitting}
+          >
+            <Text numberOfLines={1} style={styles.minQuickBtnText}>
+              BUY
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.minQuickBtn,
+              styles.sellActiveBtn,
+              transactionType === 'SELL' && styles.minQuickBtnArmed,
+              (!validation.allowed || isSubmitting) && styles.disabledBtn,
+            ]}
+            onPress={() => handleMinimizedAction('SELL')}
+            disabled={!validation.allowed || isSubmitting}
+          >
+            <Text numberOfLines={1} style={styles.minQuickBtnText}>
+              SELL
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
+      {/* Collapsible Top Handle Bar */}
+      <TouchableOpacity
+        style={styles.minimizeHandleBar}
+        onPress={() => setIsMinimized(true)}
+        accessibilityLabel="Minimize Order Ticket"
+      >
+        <View style={styles.handlePillGrip} />
+        <Text numberOfLines={1} style={styles.minimizeHandleText}>
+          ⌄ Minimize Ticket
+        </Text>
+      </TouchableOpacity>
+
       {/* Row 1: Buy/Sell, 1-Click/Confirm Toggle, and Lots Counter */}
       <View style={styles.row}>
         <View style={styles.segmentedControl}>
@@ -253,8 +336,8 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
               <Text style={styles.counterBtnText}>-</Text>
             </TouchableOpacity>
             <View style={styles.lotDisplay}>
-              <Text style={styles.lotText}>{lots}L</Text>
-              <Text style={styles.qtySubtext}>{totalQty}</Text>
+              <Text numberOfLines={1} style={styles.lotText}>{lots}L</Text>
+              <Text numberOfLines={1} style={styles.qtySubtext}>{totalQty}</Text>
             </View>
             <TouchableOpacity
               style={styles.counterBtn}
@@ -539,8 +622,9 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
       {/* Risk-Reward & Compliance Metrics */}
       <View style={styles.metricsCard}>
         <View style={styles.metricCol}>
-          <Text style={styles.metricLabel}>Max Risk</Text>
+          <Text numberOfLines={1} style={styles.metricLabel}>Max Risk</Text>
           <Text
+            numberOfLines={1}
             style={[
               styles.metricVal,
               { color: isSlInverted ? '#F59E0B' : '#EF4444' },
@@ -551,8 +635,9 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         </View>
         <View style={styles.metricDivider} />
         <View style={styles.metricCol}>
-          <Text style={styles.metricLabel}>Target Reward</Text>
+          <Text numberOfLines={1} style={styles.metricLabel}>Target Reward</Text>
           <Text
+            numberOfLines={1}
             style={[
               styles.metricVal,
               { color: isTpInverted ? '#F59E0B' : '#10B981' },
@@ -563,8 +648,8 @@ export const ChartOrderPanel: React.FC<ChartOrderPanelProps> = ({
         </View>
         <View style={styles.metricDivider} />
         <View style={styles.metricCol}>
-          <Text style={styles.metricLabel}>R : R</Text>
-          <Text style={[styles.metricVal, { color: '#38BDF8' }]}>
+          <Text numberOfLines={1} style={styles.metricLabel}>R : R</Text>
+          <Text numberOfLines={1} style={[styles.metricVal, { color: '#38BDF8' }]}>
             {rrRatio !== '-' ? `1:${rrRatio}` : '-'}
           </Text>
         </View>
@@ -602,10 +687,121 @@ const styles = StyleSheet.create({
   container: {
     backgroundColor: '#0F172A',
     paddingHorizontal: 12,
-    paddingTop: 8,
-    paddingBottom: 16,
+    paddingTop: 4,
+    paddingBottom: 14,
     borderTopWidth: 1,
     borderTopColor: '#1E293B',
+  },
+  minimizeHandleBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    marginBottom: 6,
+    borderRadius: 6,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  handlePillGrip: {
+    width: 22,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#475569',
+  },
+  minimizeHandleText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  minimizedContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    height: 46,
+    backgroundColor: '#0F172A',
+    paddingHorizontal: 8,
+    gap: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+  },
+  expandHandleBtn: {
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    flexShrink: 0,
+  },
+  expandHandleText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  minMetaGroup: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    overflow: 'hidden',
+  },
+  minBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 5,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    flexShrink: 0,
+  },
+  minBadgeText: {
+    color: '#E2E8F0',
+    fontSize: 10,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  minSlTpPill: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 5,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  minSlTpText: {
+    color: '#94A3B8',
+    fontSize: 9.5,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  minActionGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 0,
+  },
+  minQuickBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  minQuickBtnArmed: {
+    borderColor: '#FFFFFF',
+  },
+  minQuickBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
   },
   row: {
     flexDirection: 'row',
@@ -702,10 +898,12 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 12,
     fontWeight: '800',
+    fontVariant: ['tabular-nums'],
   },
   qtySubtext: {
     color: '#64748B',
     fontSize: 9,
+    fontVariant: ['tabular-nums'],
   },
   controlsRow: {
     flexDirection: 'row',
@@ -822,6 +1020,7 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 12,
     fontWeight: '800',
+    fontVariant: ['tabular-nums'],
   },
   slActiveTab: {
     borderColor: '#EF4444',
@@ -889,12 +1088,14 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     paddingHorizontal: 1,
     textAlign: 'center',
+    fontVariant: ['tabular-nums'],
   },
   levelTabValue: {
     color: '#F8FAFC',
     fontSize: 13,
     fontWeight: '700',
     marginTop: 2,
+    fontVariant: ['tabular-nums'],
   },
   metricsCard: {
     flexDirection: 'row',
@@ -919,6 +1120,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     marginTop: 1,
+    fontVariant: ['tabular-nums'],
   },
   metricDivider: {
     width: 1,
@@ -963,5 +1165,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 14,
     letterSpacing: 0.5,
+    fontVariant: ['tabular-nums'],
   },
 });

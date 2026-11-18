@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, SafeAreaView, Platform } from 'react-native';
+import {
+  StyleSheet,
+  View,
+  Text,
+  TouchableOpacity,
+  SafeAreaView,
+  Platform,
+  ActivityIndicator,
+} from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Header } from './src/components/Header';
 import { ChartTradingScreen } from './src/screens/ChartTradingScreen';
@@ -8,6 +16,7 @@ import { PositionsScreen } from './src/screens/PositionsScreen';
 import { ComplianceSettingsScreen } from './src/screens/ComplianceSettingsScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { UpdateModal } from './src/components/UpdateModal';
+import { DhanLoginModal } from './src/components/DhanLoginModal';
 import { GitHubUpdaterService } from './src/services/githubUpdater';
 import { DhanApiService } from './src/services/dhanApi';
 import { DhanAuthService } from './src/services/dhanAuthService';
@@ -84,6 +93,10 @@ export default function App() {
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [killSwitchBanner, setKillSwitchBanner] = useState<KillSwitchEvent | null>(null);
   const [authToast, setAuthToast] = useState<AuthToastState | null>(null);
+  const [showSessionExpiredBanner, setShowSessionExpiredBanner] = useState(false);
+  const [isInitiatingQuickLogin, setIsInitiatingQuickLogin] = useState(false);
+  const [quickLoginUrl, setQuickLoginUrl] = useState<string | null>(null);
+  const [showQuickLoginModal, setShowQuickLoginModal] = useState(false);
   const authToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showAuthToast = (toast: AuthToastState, durationMs: number = 5000) => {
@@ -98,7 +111,77 @@ export default function App() {
     }, durationMs);
   };
 
-  // Initialize, handle Web OAuth callback, check updates, and start Max SL Auto-Exit Kill Switch monitor
+  const evaluateDailySessionExpiry = async (): Promise<boolean> => {
+    try {
+      const [appConfig, creds] = await Promise.all([
+        StorageService.getAppConfig(),
+        StorageService.getCredentials(),
+      ]);
+
+      const hasSavedAppConfig = Boolean(
+        appConfig?.clientId?.trim() &&
+          appConfig?.appId?.trim() &&
+          appConfig?.appSecret?.trim()
+      );
+      const isNotDemoMode = Boolean(creds && creds.isDemoMode !== true);
+      const isSessionExpired = !DhanAuthService.isSessionValid(creds?.expiryTime);
+
+      return hasSavedAppConfig && isNotDemoMode && isSessionExpired;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleQuickMorningLogin = async () => {
+    if (isInitiatingQuickLogin) return;
+    setIsInitiatingQuickLogin(true);
+    try {
+      const { loginUrl } = await DhanAuthService.generateConsent();
+      setQuickLoginUrl(loginUrl);
+      setShowQuickLoginModal(true);
+    } catch (err: any) {
+      showAuthToast(
+        {
+          type: 'warning',
+          message: `⚠️ Could not start Dhan Login: ${err?.message || 'Check App Config in Account tab.'}`,
+        },
+        6500
+      );
+    } finally {
+      setIsInitiatingQuickLogin(false);
+    }
+  };
+
+  const handleQuickLoginTokenCaptured = async (tokenId: string) => {
+    setShowQuickLoginModal(false);
+    setQuickLoginUrl(null);
+    setIsInitiatingQuickLogin(true);
+    try {
+      const result = await DhanAuthService.consumeConsent(tokenId);
+      setShowSessionExpiredBanner(false);
+      await refreshAccountState();
+      const label = result?.dhanClientName ? ` (${result.dhanClientName})` : '';
+      showAuthToast(
+        {
+          type: 'success',
+          message: `✓ Connected to Dhan via 1-Tap Login!${label}`,
+        },
+        5500
+      );
+    } catch (err: any) {
+      showAuthToast(
+        {
+          type: 'warning',
+          message: `⚠️ Dhan 1-Tap Login failed: ${err?.message || 'Please try again.'}`,
+        },
+        7000
+      );
+    } finally {
+      setIsInitiatingQuickLogin(false);
+    }
+  };
+
+  // Initialize, handle Web OAuth callback, check daily session expiry, check updates, and start Max SL Kill Switch monitor
   useEffect(() => {
     let isMounted = true;
 
@@ -116,6 +199,7 @@ export default function App() {
       try {
         const result = await DhanAuthService.consumeConsent(tokenId);
         if (!isMounted) return;
+        setShowSessionExpiredBanner(false);
         await refreshAccountState();
         const label = result?.dhanClientName ? ` (${result.dhanClientName})` : '';
         showAuthToast(
@@ -135,9 +219,19 @@ export default function App() {
       }
     };
 
-    refreshAccountState();
+    const bootstrapStartup = async () => {
+      await handleWebOAuthRedirect();
+      if (!isMounted) return;
+      await refreshAccountState();
+      if (!isMounted) return;
+      const shouldPrompt = await evaluateDailySessionExpiry();
+      if (isMounted) {
+        setShowSessionExpiredBanner(shouldPrompt);
+      }
+    };
+
+    void bootstrapStartup();
     checkAppUpdates();
-    void handleWebOAuthRedirect();
 
     AutoSquareOffEngine.startMonitoring(3000);
     const unsubPnl = AutoSquareOffEngine.onPnlUpdate((totalPnl) => {
@@ -160,11 +254,16 @@ export default function App() {
   }, []);
 
   const refreshAccountState = async () => {
-    const isDemo = await DhanApiService.isDemoMode();
+    const [isDemo, complianceState, shouldPrompt] = await Promise.all([
+      DhanApiService.isDemoMode(),
+      StorageService.getComplianceState(),
+      evaluateDailySessionExpiry(),
+    ]);
     setIsDemoMode(isDemo);
-
-    const complianceState = await StorageService.getComplianceState();
     setTodayPnl(complianceState.todayRealizedPnl + complianceState.todayUnrealizedPnl);
+    if (!shouldPrompt) {
+      setShowSessionExpiredBanner(false);
+    }
   };
 
   const checkAppUpdates = async () => {
@@ -210,6 +309,40 @@ export default function App() {
           onPressSettings={() => setActiveTab('SETTINGS')}
           activeScreenTitle={getScreenTitle()}
         />
+
+        {/* Sensibull-Style Daily Morning Session Expired Banner */}
+        {showSessionExpiredBanner && (
+          <View style={styles.sessionBanner}>
+            <Text style={styles.sessionBannerText} numberOfLines={1} ellipsizeMode="tail">
+              🔐 Daily Dhan Session Expired
+            </Text>
+            <View style={styles.sessionBannerActions}>
+              <TouchableOpacity
+                style={[
+                  styles.sessionLoginBtn,
+                  isInitiatingQuickLogin && styles.sessionLoginBtnDisabled,
+                ]}
+                onPress={handleQuickMorningLogin}
+                disabled={isInitiatingQuickLogin}
+              >
+                {isInitiatingQuickLogin ? (
+                  <ActivityIndicator size="small" color="#052E16" />
+                ) : (
+                  <Text style={styles.sessionLoginBtnText} numberOfLines={1}>
+                    ⚡ Login with Dhan
+                  </Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sessionDismissBtn}
+                onPress={() => setShowSessionExpiredBanner(false)}
+                accessibilityLabel="Dismiss session expired banner"
+              >
+                <Text style={styles.sessionDismissText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* 1-Tap Dhan OAuth Redirect Toast Banner */}
         {authToast && (
@@ -360,6 +493,17 @@ export default function App() {
           updateInfo={updateInfo}
           onClose={() => setShowUpdateModal(false)}
         />
+
+        {/* Global 1-Tap Dhan Login Modal (triggered from Morning Session Expired banner) */}
+        <DhanLoginModal
+          visible={showQuickLoginModal}
+          loginUrl={quickLoginUrl}
+          onTokenCaptured={handleQuickLoginTokenCaptured}
+          onClose={() => {
+            setShowQuickLoginModal(false);
+            setQuickLoginUrl(null);
+          }}
+        />
       </View>
     </SafeAreaView>
   );
@@ -469,5 +613,57 @@ const styles = StyleSheet.create({
   },
   authToastWarningText: {
     color: '#FEF3C7',
+  },
+  sessionBanner: {
+    backgroundColor: '#1E293B',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F59E0B',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexShrink: 0,
+  },
+  sessionBannerText: {
+    flex: 1,
+    color: '#FDE68A',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  sessionBannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    gap: 6,
+  },
+  sessionLoginBtn: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    minWidth: 112,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sessionLoginBtnDisabled: {
+    opacity: 0.7,
+  },
+  sessionLoginBtnText: {
+    color: '#052E16',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  sessionDismissBtn: {
+    paddingHorizontal: 7,
+    paddingVertical: 5,
+    backgroundColor: '#334155',
+    borderRadius: 6,
+  },
+  sessionDismissText: {
+    color: '#CBD5E1',
+    fontSize: 11,
+    fontWeight: '800',
   },
 });

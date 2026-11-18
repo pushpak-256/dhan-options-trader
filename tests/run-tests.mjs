@@ -2362,6 +2362,331 @@ await test('Headless Chromium renders http://localhost:8081 with real DOM conten
   }
 });
 
+// ============================================================================
+// SUITE I: Mobile 375x812 Real-Phone Regression Suite (v1.0.4)
+// ============================================================================
+suite('I. Mobile 375x812 Real-Phone Zero-Wobble, Collapsible Ticket & 2-Axis Chart Pan (v1.0.4)');
+
+await test('Zero-wobble fixed heights, touch-action:none, and Morning Auto-Login Banner are wired', () => {
+  const headerSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/Header.tsx'), 'utf8');
+  const chartScreenSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/screens/ChartTradingScreen.tsx'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'App.tsx'), 'utf8');
+
+  assert.ok(headerSrc.includes('height: 52') && headerSrc.includes('tabular-nums'), 'Header.tsx must enforce fixed height: 52 and tabular-nums');
+  assert.ok(chartScreenSrc.includes('height: 64') && chartScreenSrc.includes("position: 'absolute'"), 'ChartTradingScreen.tsx must enforce fixed height: 64 and floating absolute toast');
+  assert.ok(chartSource.includes('touch-action: none') && chartSource.includes('btnAutoY'), 'InteractiveChart.tsx must include touch-action: none and Auto Y control');
+  assert.ok(appSrc.includes('Daily Dhan Session Expired') && appSrc.includes('DhanLoginModal'), 'App.tsx must render Daily Dhan Session Expired banner with DhanLoginModal');
+});
+
+await test('Mobile 375x812 Headless Chromium E2E: 0px wobble across live ticks, +120px collapsible drawer, and 2-axis X/Y pan without hijacking', async () => {
+  const browserPath = findBrowserExecutable();
+  assert.ok(browserPath, 'Chrome or Edge executable must exist for mobile E2E verification');
+
+  const port = await getFreePort();
+  const userDataDir = path.join(os.tmpdir(), `dhan-tests-mobile-${Date.now()}`);
+  fs.mkdirSync(userDataDir, { recursive: true });
+
+  const chrome = spawn(
+    browserPath,
+    [
+      '--headless=new',
+      '--disable-gpu',
+      '--no-sandbox',
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      'about:blank',
+    ],
+    { stdio: 'ignore' }
+  );
+
+  let ws = null;
+  try {
+    let target = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+        if (res.ok) {
+          const list = await res.json();
+          const page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+          if (page) {
+            target = page;
+            break;
+          }
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.ok(target, 'Mobile Headless Chromium CDP endpoint did not start in time');
+
+    ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', resolve, { once: true });
+      ws.addEventListener('error', reject, { once: true });
+    });
+
+    let msgId = 1;
+    const pending = new Map();
+    const consoleErrors = [];
+    const pageExceptions = [];
+
+    ws.addEventListener('message', (evt) => {
+      const msg = JSON.parse(evt.data.toString());
+      if (msg.id && pending.has(msg.id)) {
+        const { resolve, reject } = pending.get(msg.id);
+        pending.delete(msg.id);
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result);
+        return;
+      }
+      if (msg.method === 'Runtime.consoleAPICalled' && msg.params?.type === 'error') {
+        const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ');
+        consoleErrors.push(text);
+      }
+      if (msg.method === 'Runtime.exceptionThrown') {
+        const details = msg.params?.exceptionDetails;
+        pageExceptions.push(
+          details?.exception?.description || details?.text || 'Unknown Runtime Exception'
+        );
+      }
+    });
+
+    const cdp = (method, params = {}) =>
+      new Promise((resolve, reject) => {
+        const id = msgId++;
+        pending.set(id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+
+    await cdp('Runtime.enable');
+    await cdp('Page.enable');
+    // Emulate real iPhone 375x812 viewport
+    await cdp('Emulation.setDeviceMetricsOverride', {
+      width: 375,
+      height: 812,
+      deviceScaleFactor: 2,
+      mobile: true,
+    });
+    await cdp('Page.navigate', { url: APP_URL });
+
+    // Wait for KLineChart v9 iframe to fully mount on mobile viewport
+    let ready = false;
+    for (let i = 0; i < 30; i++) {
+      const check = await cdp('Runtime.evaluate', {
+        expression: `(() => {
+          const iframe = document.querySelector('iframe');
+          if (!iframe || !iframe.contentWindow || !iframe.contentDocument) return false;
+          const hasLib = typeof iframe.contentWindow.klinecharts !== 'undefined';
+          const hasCanvas = iframe.contentDocument.querySelectorAll('#klineContainer canvas').length > 0;
+          const rect = iframe.getBoundingClientRect();
+          return hasLib && hasCanvas && rect.height > 80;
+        })()`,
+        returnByValue: true,
+      });
+      if (check?.result?.value) {
+        ready = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    assert.equal(ready, true, 'Chart iframe did not initialize cleanly on 375x812 mobile viewport');
+
+    // 1. ZERO-WOBBLE LAYOUT STABILITY TEST across 8 live price ticks (~2.8s)
+    // Also inject rapid varying-width LTP ticks to stress-test digit wrapping
+    const samples = [];
+    const stressPrices = [99.05, 132.75, 1245.5, 88.1, 149.95, 1002.25, 145.6, 132.7];
+    for (let i = 0; i < stressPrices.length; i++) {
+      const sampleRes = await cdp('Runtime.evaluate', {
+        expression: `(() => {
+          const iframe = document.querySelector('iframe');
+          const r = iframe.getBoundingClientRect();
+          const root = document.getElementById('root');
+          const rootH = root ? root.getBoundingClientRect().height : 0;
+          // Feed live tick into iframe too
+          try {
+            iframe.contentWindow.handleHostMessage(JSON.stringify({
+              type: 'LIVE_TICK',
+              price: ${stressPrices[i]},
+              volume: 50,
+              timestamp: Date.now()
+            }));
+          } catch {}
+          return {
+            top: Math.round(r.top),
+            height: Math.round(r.height),
+            rootH: Math.round(rootH),
+            ltp: iframe.contentDocument.getElementById('ltpHeader')?.textContent || '',
+          };
+        })()`,
+        returnByValue: true,
+      });
+      samples.push(sampleRes?.result?.value);
+      await new Promise((r) => setTimeout(r, 360));
+    }
+
+    const tops = samples.map((s) => s.top);
+    const heights = samples.map((s) => s.height);
+    const topDrift = Math.max(...tops) - Math.min(...tops);
+    const heightDrift = Math.max(...heights) - Math.min(...heights);
+    assert.equal(
+      topDrift,
+      0,
+      `Detected vertical header/chart wobble on 375x812 phone! iframe.top samples: ${JSON.stringify(tops)}`
+    );
+    assert.equal(
+      heightDrift,
+      0,
+      `Detected chart height wobble on 375x812 phone! iframe.height samples: ${JSON.stringify(heights)}`
+    );
+
+    // 2. COLLAPSIBLE ORDER TICKET DRAWER TEST (+120px chart height gain)
+    const heightBefore = samples[samples.length - 1].height;
+    const minClicked = await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const el = Array.from(document.querySelectorAll('div, span, button')).find(
+          (n) => n.childElementCount === 0 && n.textContent && n.textContent.includes('Minimize Ticket')
+        );
+        if (el) { el.click(); return true; }
+        return false;
+      })()`,
+      returnByValue: true,
+    });
+    assert.equal(minClicked?.result?.value, true, 'Could not find/click "⌄ Minimize Ticket" drawer button');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const collapsedState = await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const iframe = document.querySelector('iframe');
+        const r = iframe.getBoundingClientRect();
+        const text = document.body.innerText || '';
+        return {
+          height: Math.round(r.height),
+          hasExpandBtn: text.includes('Ticket'),
+          stillHasMinimize: text.includes('Minimize Ticket'),
+        };
+      })()`,
+      returnByValue: true,
+    });
+    const heightGain = collapsedState?.result?.value?.height - heightBefore;
+    assert.equal(collapsedState?.result?.value?.stillHasMinimize, false, 'Order ticket did not collapse');
+    assert.equal(collapsedState?.result?.value?.hasExpandBtn, true, 'Slim collapsed bar missing ⌃ Ticket button');
+    assert.ok(
+      heightGain >= 120,
+      `Expected collapsing order ticket to gain >= +120px chart height, got +${heightGain}px (${heightBefore} -> ${collapsedState?.result?.value?.height})`
+    );
+
+    // Restore full order ticket
+    const expandClicked = await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const el = Array.from(document.querySelectorAll('div, span, button')).find(
+          (n) => n.childElementCount === 0 && n.textContent && n.textContent.trim().includes('Ticket')
+        );
+        if (el) { el.click(); return true; }
+        return false;
+      })()`,
+      returnByValue: true,
+    });
+    assert.equal(expandClicked?.result?.value, true, 'Could not find/click ⌃ Ticket restore button');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const restoredState = await cdp('Runtime.evaluate', {
+      expression: `({
+        hasMinimize: (document.body.innerText || '').includes('Minimize Ticket'),
+        height: Math.round(document.querySelector('iframe').getBoundingClientRect().height),
+      })`,
+      returnByValue: true,
+    });
+    assert.equal(restoredState?.result?.value?.hasMinimize, true, 'Full order ticket did not restore cleanly');
+
+    // 3. BOTH-AXIS (X + Y) CHART PAN & PILL-ONLY HIT-TEST
+    const panResult = await cdp('Runtime.evaluate', {
+      expression: `(() => {
+        const iframe = document.querySelector('iframe');
+        const d = iframe.contentDocument;
+        const w = iframe.contentWindow;
+        const chartArea = d.getElementById('chartArea');
+        const klineContainer = d.getElementById('klineContainer');
+        const autoYBtn = d.getElementById('btnAutoY');
+        const rect = chartArea.getBoundingClientRect();
+
+        // Listen on parent window for any unwanted LEVEL_DRAGGED messages
+        const levelDraggedMsgs = [];
+        const listener = (e) => {
+          try {
+            const parsed = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+            if (parsed && parsed.type === 'LEVEL_DRAGGED') levelDraggedMsgs.push(parsed);
+          } catch {}
+        };
+        window.addEventListener('message', listener);
+
+        // Drag diagonally across center-left of candles (away from right-aligned pills!)
+        const startX = rect.left + Math.round(rect.width * 0.35);
+        const startY = rect.top + Math.round(rect.height * 0.45);
+        const autoYBefore = autoYBtn ? autoYBtn.textContent.trim() : '';
+
+        klineContainer.dispatchEvent(new w.MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: startX, clientY: startY, button: 0 }));
+        for (let step = 1; step <= 8; step++) {
+          const cx = startX + step * 8;
+          const cy = startY + step * 8;
+          w.dispatchEvent(new w.MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: cx, clientY: cy, buttons: 1 }));
+        }
+        w.dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: startX + 64, clientY: startY + 64, button: 0 }));
+
+        const autoYAfterPan = autoYBtn ? autoYBtn.textContent.trim() : '';
+
+        // Click reset button to restore Auto Y
+        const resetBtn = d.getElementById('btnResetChart');
+        if (resetBtn) resetBtn.click();
+        const autoYAfterReset = autoYBtn ? autoYBtn.textContent.trim() : '';
+
+        window.removeEventListener('message', listener);
+        return {
+          levelDraggedCount: levelDraggedMsgs.length,
+          autoYBefore,
+          autoYAfterPan,
+          autoYAfterReset,
+        };
+      })()`,
+      returnByValue: true,
+    });
+
+    assert.equal(
+      panResult?.result?.value?.levelDraggedCount,
+      0,
+      `Center chart drag was hijacked by order lines! Got LEVEL_DRAGGED: ${JSON.stringify(panResult?.result?.value)}`
+    );
+    assert.ok(
+      String(panResult?.result?.value?.autoYAfterPan || '').includes('Free Y'),
+      `Vertical Y-axis pan did not unlock Auto Y -> Free Y! Got: ${JSON.stringify(panResult?.result?.value)}`
+    );
+    assert.ok(
+      String(panResult?.result?.value?.autoYAfterReset || '').includes('Auto Y'),
+      `Clicking ⟲ reset did not re-lock Free Y -> Auto Y! Got: ${JSON.stringify(panResult?.result?.value)}`
+    );
+
+    assert.deepEqual(
+      pageExceptions,
+      [],
+      `Uncaught runtime JS exceptions on 375x812 mobile viewport: ${JSON.stringify(pageExceptions)}`
+    );
+    assert.deepEqual(
+      consoleErrors,
+      [],
+      `Console errors on 375x812 mobile viewport: ${JSON.stringify(consoleErrors)}`
+    );
+  } finally {
+    try {
+      ws?.close();
+    } catch {}
+    try {
+      chrome.kill('SIGKILL');
+    } catch {}
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
 if (staticServer) {
   staticServer.close();
 }

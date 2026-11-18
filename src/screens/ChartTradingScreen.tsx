@@ -636,17 +636,29 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
 
   return (
     <View style={styles.container}>
-      {/* Strike Quick Selector Header */}
+      {/* Strike Quick Selector Header (strict fixed height 64px, zero-wobble on live ticks) */}
       <View style={styles.topSelectorBar}>
         <View style={styles.headerLeft}>
           <View style={styles.symbolRow}>
-            <Text style={styles.symbolTitle}>{selectedContract.tradingSymbol}</Text>
+            <Text
+              style={styles.symbolTitle}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+            >
+              {selectedContract.tradingSymbol}
+            </Text>
             <View style={styles.liveDotBadge}>
-              <Text style={styles.liveDotText}>● LIVE</Text>
+              <Text style={styles.liveDotText} numberOfLines={1}>
+                ● LIVE
+              </Text>
             </View>
           </View>
-          <View style={styles.ltpRow}>
-            <Text style={styles.subTitle}>LTP: </Text>
+          <Text
+            style={styles.subTitle}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
+            LTP:{' '}
             <Text style={[styles.liveLtpVal, { color: ltpColor }]}>
               ₹{liveLtp.toFixed(2)}
             </Text>
@@ -659,9 +671,13 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
               {' '}({liveChangePercent >= 0 ? '+' : ''}
               {liveChangePercent.toFixed(2)}%)
             </Text>
-            <Text style={styles.subTitle}> • Lot: {lotSize}</Text>
-          </View>
-          <Text style={styles.breakevenText}>
+            {' '}• Lot: {lotSize}
+          </Text>
+          <Text
+            style={styles.breakevenText}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
             Breakeven Spot:{' '}
             <Text style={styles.breakevenVal}>
               ₹
@@ -673,13 +689,16 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
         </View>
 
         <TouchableOpacity style={styles.chainBtn} onPress={onOpenChain}>
-          <Text style={styles.chainBtnText}>Option Chain ➔</Text>
+          <Text style={styles.chainBtnText} numberOfLines={1}>
+            Option Chain ➔
+          </Text>
         </TouchableOpacity>
       </View>
 
-      {/* Auto-dismissing Toast Banner */}
+      {/* Auto-dismissing Floating Toast Overlay (never shifts chart layout) */}
       {toast && (
         <View
+          pointerEvents="none"
           style={[
             styles.toastBanner,
             toast.tone === 'success' && styles.toastSuccess,
@@ -687,7 +706,9 @@ export const ChartTradingScreen: React.FC<ChartTradingScreenProps> = ({
             toast.tone === 'error' && styles.toastError,
           ]}
         >
-          <Text style={styles.toastText}>{toast.message}</Text>
+          <Text style={styles.toastText} numberOfLines={2} ellipsizeMode="tail">
+            {toast.message}
+          </Text>
         </View>
       )}
 
@@ -878,11 +899,13 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   topSelectorBar: {
+    height: 64,
+    overflow: 'hidden',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 6,
     backgroundColor: '#1E293B',
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
@@ -890,16 +913,19 @@ const styles = StyleSheet.create({
   headerLeft: {
     flex: 1,
     marginRight: 8,
+    overflow: 'hidden',
   },
   symbolRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'nowrap',
     gap: 6,
   },
   symbolTitle: {
     color: '#F8FAFC',
     fontWeight: '800',
     fontSize: 14,
+    flexShrink: 1,
   },
   liveDotBadge: {
     backgroundColor: 'rgba(16, 185, 129, 0.14)',
@@ -908,6 +934,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: 4,
+    flexShrink: 0,
   },
   liveDotText: {
     color: '#10B981',
@@ -915,23 +942,21 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.4,
   },
-  ltpRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    marginTop: 2,
-  },
   liveLtpVal: {
     fontSize: 12,
     fontWeight: '800',
+    fontVariant: ['tabular-nums'],
   },
   liveChangeText: {
     fontSize: 11,
     fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   subTitle: {
     color: '#94A3B8',
     fontSize: 11,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
   },
   breakevenText: {
     color: '#64748B',
@@ -942,12 +967,14 @@ const styles = StyleSheet.create({
   breakevenVal: {
     color: '#F59E0B',
     fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   chainBtn: {
     backgroundColor: '#38BDF8',
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 6,
+    flexShrink: 0,
   },
   chainBtnText: {
     color: '#0F172A',
@@ -955,23 +982,34 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
   toastBanner: {
-    backgroundColor: '#1E293B',
-    borderBottomWidth: 1,
-    borderBottomColor: '#38BDF8',
+    position: 'absolute',
+    top: 68,
+    left: 10,
+    right: 10,
+    zIndex: 50,
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 7,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 8,
   },
   toastSuccess: {
-    backgroundColor: 'rgba(16, 185, 129, 0.16)',
-    borderBottomColor: '#10B981',
+    backgroundColor: 'rgba(6, 78, 59, 0.94)',
+    borderColor: '#10B981',
   },
   toastWarning: {
-    backgroundColor: 'rgba(245, 158, 11, 0.16)',
-    borderBottomColor: '#F59E0B',
+    backgroundColor: 'rgba(120, 53, 15, 0.94)',
+    borderColor: '#F59E0B',
   },
   toastError: {
-    backgroundColor: 'rgba(239, 68, 68, 0.18)',
-    borderBottomColor: '#EF4444',
+    backgroundColor: 'rgba(127, 29, 29, 0.94)',
+    borderColor: '#EF4444',
   },
   toastText: {
     color: '#F8FAFC',

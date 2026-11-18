@@ -24,7 +24,9 @@ export const Header: React.FC<HeaderProps> = ({
     <View style={styles.header}>
       {/* Left: App Title and Live/Demo badge */}
       <View style={styles.leftSection}>
-        <Text style={styles.title}>DHAN TRADER</Text>
+        <Text style={styles.title} numberOfLines={1}>
+          DHAN TRADER
+        </Text>
         <View
           style={[
             styles.modeBadge,
@@ -42,6 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
               styles.modeText,
               isDemoMode ? styles.demoText : styles.liveText,
             ]}
+            numberOfLines={1}
           >
             {isDemoMode ? 'DEMO' : 'LIVE'}
           </Text>
@@ -49,30 +52,39 @@ export const Header: React.FC<HeaderProps> = ({
       </View>
 
       {/* Middle: Screen Title */}
-      <Text style={styles.screenTitle}>{activeScreenTitle}</Text>
+      <Text style={styles.screenTitle} numberOfLines={1} ellipsizeMode="tail">
+        {activeScreenTitle}
+      </Text>
 
       {/* Right: P&L + Update pill + Settings */}
       <View style={styles.rightSection}>
         {hasUpdate && (
           <TouchableOpacity style={styles.updateBadge} onPress={onPressUpdate}>
-            <Text style={styles.updateBadgeText}>⚡ UPDATE</Text>
+            <Text style={styles.updateBadgeText} numberOfLines={1}>
+              ⚡ UPDATE
+            </Text>
           </TouchableOpacity>
         )}
 
         <View style={styles.pnlBox}>
-          <Text style={styles.pnlLabel}>DAY MTM</Text>
+          <Text style={styles.pnlLabel} numberOfLines={1}>
+            DAY MTM
+          </Text>
           <Text
             style={[
               styles.pnlValue,
               isPnlPositive ? styles.profitText : styles.lossText,
             ]}
+            numberOfLines={1}
           >
             {isPnlPositive ? '+' : ''}₹{todayPnl.toFixed(0)}
           </Text>
         </View>
 
         <TouchableOpacity style={styles.iconBtn} onPress={onPressSettings}>
-          <Text style={styles.iconBtnText}>⚙️</Text>
+          <Text style={styles.iconBtnText} numberOfLines={1}>
+            ⚙️
+          </Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -81,25 +93,28 @@ export const Header: React.FC<HeaderProps> = ({
 
 const styles = StyleSheet.create({
   header: {
-    height: 56,
+    height: 52,
+    flexShrink: 0,
+    overflow: 'hidden',
     backgroundColor: '#0B1120',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
   },
   leftSection: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    flexShrink: 0,
+    gap: 5,
   },
   title: {
     color: '#F8FAFC',
     fontWeight: '900',
-    fontSize: 14,
-    letterSpacing: 0.5,
+    fontSize: 13,
+    letterSpacing: 0.4,
   },
   modeBadge: {
     flexDirection: 'row',
@@ -137,14 +152,19 @@ const styles = StyleSheet.create({
     color: '#F59E0B',
   },
   screenTitle: {
+    flex: 1,
+    flexShrink: 1,
     color: '#94A3B8',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: 6,
   },
   rightSection: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    flexShrink: 0,
+    gap: 6,
   },
   updateBadge: {
     backgroundColor: '#38BDF8',
@@ -159,15 +179,21 @@ const styles = StyleSheet.create({
   },
   pnlBox: {
     alignItems: 'flex-end',
+    minWidth: 58,
   },
   pnlLabel: {
     color: '#64748B',
     fontSize: 8,
     fontWeight: '700',
+    lineHeight: 10,
   },
   pnlValue: {
     fontSize: 12,
     fontWeight: '800',
+    lineHeight: 15,
+    minWidth: 58,
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
   },
   profitText: {
     color: '#10B981',
@@ -176,11 +202,12 @@ const styles = StyleSheet.create({
     color: '#EF4444',
   },
   iconBtn: {
-    padding: 6,
+    padding: 5,
     backgroundColor: '#1E293B',
     borderRadius: 6,
   },
   iconBtnText: {
     fontSize: 14,
+    lineHeight: 16,
   },
 });
